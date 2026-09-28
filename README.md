@@ -16,32 +16,30 @@ Windows 可运行核心与测试；Bash、journal 和 systemd 在 Linux 使用�
 
 ## Linux 安装
 
-先将仓库放到 `/opt/rustdesk-relay-helper`。以下命令在该目录执行，创建专用服务账户、配置和状态目录；如果已有同名账户则复用。
+先将仓库放到 `/opt/rustdesk-relay-helper`。以下命令在该目录执行，创建配置和状态目录。systemd 默认以 root 运行，无需创建专用账户；已经在 root shell 中时可以省略 `sudo`。
 
 ```bash
-id rustdesk-relay-helper >/dev/null 2>&1 || sudo useradd --system --no-create-home --shell /usr/sbin/nologin rustdesk-relay-helper
-sudo install -d -m 0750 -o root -g rustdesk-relay-helper /etc/rustdesk-relay-helper
-sudo install -d -m 0750 -o rustdesk-relay-helper -g rustdesk-relay-helper /var/lib/rustdesk-relay-helper
+sudo install -d -m 0750 /etc/rustdesk-relay-helper /var/lib/rustdesk-relay-helper
 # 仅首次安装复制；不要覆盖已有真实配置。
-sudo test -e /etc/rustdesk-relay-helper/config.ini || sudo install -m 0640 -o root -g rustdesk-relay-helper config/relay-helper.example.ini /etc/rustdesk-relay-helper/config.ini
+sudo test -e /etc/rustdesk-relay-helper/config.ini || sudo install -m 0640 config/relay-helper.example.ini /etc/rustdesk-relay-helper/config.ini
 sudo install -m 0755 bin/rustdesk-relay-helper /usr/local/bin/rustdesk-relay-helper
 sudo install -m 0644 deploy/systemd/rustdesk-relay-helper.service deploy/systemd/rustdesk-relay-helper.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudoedit /etc/rustdesk-relay-helper/config.ini
 ```
 
-代码目录及父目录应允许服务账户读取和进入，代码由管理员维护。配置由 root 编辑、服务组只读，状态由服务账户写入。所有管理命令也用该账户运行，避免产生服务无法替换的 root 所有状态文件。不要设置独立网络命名空间，否则 loopback 无法访问现有 `hbbs`。
+程序本身不检查用户名，也不要求 root；使用自定义配置和可写状态路径时，可以直接由当前用户运行。以上系统目录部署方式使用 `sudo` 是为了访问对应文件。进程须与 `hbbs` 共享网络命名空间，以访问其 loopback 控制台。
 
 修改示例中的真实地址；备用节点默认禁用，无备用时可保留禁用或删除该节。地址必须是 `host:port` 或 `[IPv6]:port`。`tier` 越小越优先，`rtt_ranked = false` 的节点在同层排名池无可用候选时按配置顺序接管。修改配置后下次命令自动读取，不需要重启常驻进程。
 
 ## 命令
 
 ```bash
-sudo -u rustdesk-relay-helper rustdesk-relay-helper status
-sudo -u rustdesk-relay-helper rustdesk-relay-helper nodes
-sudo -u rustdesk-relay-helper rustdesk-relay-helper probe
-sudo -u rustdesk-relay-helper rustdesk-relay-helper switch usla
-sudo -u rustdesk-relay-helper rustdesk-relay-helper auto
+sudo rustdesk-relay-helper status
+sudo rustdesk-relay-helper nodes
+sudo rustdesk-relay-helper probe
+sudo rustdesk-relay-helper switch usla
+sudo rustdesk-relay-helper auto
 sudo rustdesk-relay-helper history --lines 50
 ```
 
@@ -66,7 +64,7 @@ TCP 探测只代表 **CNHZ → relay TCP 端口** 可达。耗时包含主机名
 先核实服务器版本及 `rs` 只读输出，替换真实节点，确认客户端 Relay Server 留空。按规划先用真实客户端验证目标 relay，再执行 `probe`（默认需累计 6 个成功周期）和首次 `switch`，确认新建中继会话的实际路径。只有现场写入及客户端验证通过后，再启用 timer：
 
 ```bash
-sudo -u rustdesk-relay-helper rustdesk-relay-helper auto
+sudo rustdesk-relay-helper auto
 sudo systemctl enable --now rustdesk-relay-helper.timer
 sudo systemctl list-timers rustdesk-relay-helper.timer
 ```

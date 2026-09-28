@@ -5,8 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=rustdesk-relay-helper
-Group=rustdesk-relay-helper
 WorkingDirectory=/opt/rustdesk-relay-helper
 StateDirectory=rustdesk-relay-helper
 StateDirectoryMode=0750
