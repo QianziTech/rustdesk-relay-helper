@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically check RustDesk relay nodes
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=20s
+AccuracySec=1s
+Unit=rustdesk-relay-helper.service
+
+[Install]
+WantedBy=timers.target

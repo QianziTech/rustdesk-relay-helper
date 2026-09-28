@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+app_dir="${RELAY_HELPER_HOME:-/opt/rustdesk-relay-helper}"
+export PYTHONPATH="${app_dir}${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${PYTHON:-python3}" -m relay_helper "$@"
