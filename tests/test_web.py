@@ -251,6 +251,28 @@ class HTTPTests(BackendFixture):
         self.assertEqual(code, 409)
         self.assertIn('管理器忙', json.loads(body)['error'])
 
+    def test_form_mapping_requires_auth_and_never_writes_files(self):
+        self.assertEqual(self.request('/api/config/parse', 'POST', {'text': CONFIG})[0], 401)
+        code, _, body = self.request('/api/config/parse', 'POST', {'text': CONFIG}, auth=True)
+        self.assertEqual(code, 200)
+        model = json.loads(body)['data']
+        model['policy']['recover_after'] = 4
+        draft = {'text': CONFIG, 'model': model}
+        self.assertEqual(self.request('/api/config/render', 'POST', draft)[0], 401)
+        with command_lock(str(self.state_path) + '.lock'):
+            code, _, body = self.request('/api/config/render', 'POST', draft, auth=True)
+        self.assertEqual(code, 200)
+        self.assertIn('recover_after=4', json.loads(body)['data']['text'])
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
+        self.assertFalse(self.state_path.exists())
+        self.assertFalse(Path(str(self.config_path) + '.webui.bak').exists())
+
+    def test_invalid_form_drafts_return_errors_and_leave_disk_unchanged(self):
+        for body in ({'text': '[policy]\n'}, {'text': 1}, {'text': CONFIG, 'extra': True}):
+            self.assertEqual(self.request('/api/config/parse', 'POST', body, auth=True)[0], 400)
+        self.assertEqual(self.request('/api/config/render', 'POST', {'text': CONFIG, 'model': {}}, auth=True)[0], 400)
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,7 +4,7 @@ import configparser
 import ipaddress
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Tuple
 
@@ -105,3 +105,105 @@ def parse_config(text):
     if not nodes:
         raise ValueError('至少配置一个节点')
     return Config(Policy(**values), tuple(nodes))
+
+
+def config_model(text):
+    """Map a valid INI draft to the form, including omitted default values."""
+    config = parse_config(text)
+    return {'policy': asdict(config.policy), 'nodes': [asdict(node) for node in config.nodes]}
+
+
+def _model_config(model):
+    if not isinstance(model, dict) or set(model) != {'policy', 'nodes'}:
+        raise ValueError('表单必须包含 policy 和 nodes')
+    policy, nodes = model['policy'], model['nodes']
+    if not isinstance(policy, dict) or set(policy) != set(Policy.__dataclass_fields__):
+        raise ValueError('表单策略字段不完整或包含未知字段')
+    for name, value in policy.items():
+        integer = isinstance(getattr(Policy(), name), int)
+        if type(value) not in ((int,) if integer else (int, float)):
+            raise ValueError('策略字段必须为' + ('整数: ' if integer else '数字: ') + name)
+    if not isinstance(nodes, list) or not nodes:
+        raise ValueError('表单至少需要一个节点')
+    sections = [('policy', policy)]
+    ids = set()
+    for node in nodes:
+        if not isinstance(node, dict) or set(node) != set(Node.__dataclass_fields__):
+            raise ValueError('节点表单字段不完整或包含未知字段')
+        if (type(node['id']) is not str or not re.fullmatch(r'[A-Za-z0-9_-]+', node['id'])
+                or type(node['address']) is not str or type(node['tier']) is not int
+                or type(node['enabled']) is not bool or type(node['rtt_ranked']) is not bool):
+            raise ValueError('节点表单的 ID、地址、层级或开关类型无效')
+        if node['id'] in ids:
+            raise ValueError('节点 ID 重复: ' + node['id'])
+        ids.add(node['id'])
+        sections.append(('node:' + node['id'], {key: value for key, value in node.items() if key != 'id'}))
+    text = '\n'.join(_section_text(name, values) for name, values in sections)
+    return parse_config(text)
+
+
+def _value_text(value):
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def _section_text(name, values):
+    return '[{}]\n{}\n'.format(name, '\n'.join(key + ' = ' + _value_text(value) for key, value in values.items()))
+
+
+def _update_section(lines, before, after):
+    changed = {key: value for key, value in after.items() if before.get(key) != value}
+    if not changed:
+        return ''.join(lines)
+    result, found, replacing = [lines[0]], set(), False
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(('#', ';')):
+            result.append(line)
+            continue
+        match = re.match(r'^([ \t]*([^:=]+?)[ \t]*[:=][ \t]*)(.*)$', line.rstrip('\r\n'))
+        if match:
+            key = match[2].strip().lower()
+            replacing = key in changed
+            if replacing:
+                ending = '\r\n' if line.endswith('\r\n') else '\n'
+                result.append(match[1] + _value_text(changed[key]) + ending)
+                found.add(key)
+            else:
+                result.append(line)
+        elif not replacing:
+            result.append(line)
+    if result and not result[-1].endswith('\n'):
+        result[-1] += '\n'
+    for key, value in changed.items():
+        if key not in found:
+            result.append(key + ' = ' + _value_text(value) + '\n')
+    return ''.join(result)
+
+
+def update_config_text(text, model):
+    """Project a form onto its draft, retaining existing comments and defaults."""
+    previous, desired = parse_config(text), _model_config(model)
+    if previous == desired:
+        return text
+    prefix, sections, current = [], {}, None
+    for line in text.splitlines(keepends=True):
+        match = re.match(r'^[ \t]*\[([^\]]+)\]', line)
+        if match:
+            current = match[1]
+            sections[current] = []
+        (prefix if current is None else sections[current]).append(line)
+    parts = [''.join(prefix), _update_section(sections['policy'], asdict(previous.policy), asdict(desired.policy))]
+    old_nodes = {node.id: node for node in previous.nodes}
+    for node in desired.nodes:
+        values = {key: value for key, value in asdict(node).items() if key != 'id'}
+        name = 'node:' + node.id
+        parts.append(_update_section(sections[name], asdict(old_nodes[node.id]), values)
+                     if node.id in old_nodes else _section_text(name, values))
+    result = ''
+    for part in parts:
+        if result and part and not result.endswith('\n'):
+            result += '\n'
+        result += part
+    if parse_config(result) != desired:
+        raise ValueError('无法安全映射此 INI 格式，请使用文本编辑器修改')
+    return result

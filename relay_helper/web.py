@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from .config import load_config
+from .config import config_model, load_config, update_config_text
 from .io import Console, ConsoleError, command_lock, config_document, load_state, replace_config, save_state
 from .policy import effective_rtt
 from .service import LOG, operate
@@ -180,7 +180,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         path = self.path.partition('?')[0]
-        if path not in ('/api/probe', '/api/switch', '/api/auto', '/api/config'):
+        if path not in ('/api/probe', '/api/switch', '/api/auto', '/api/config', '/api/config/parse', '/api/config/render'):
             self.reply(404, {'ok': False, 'error': '操作不存在'})
             return
         try:
@@ -200,7 +200,15 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(content)
             if not isinstance(body, dict):
                 raise ValueError('请求必须是 JSON 对象')
-            if path == '/api/config':
+            if path == '/api/config/parse':
+                if set(body) != {'text'} or not isinstance(body['text'], str):
+                    raise ValueError('解析请求必须包含 text 字符串')
+                self.reply(200, {'ok': True, 'data': config_model(body['text'])})
+            elif path == '/api/config/render':
+                if set(body) != {'text', 'model'} or not isinstance(body['text'], str):
+                    raise ValueError('映射请求必须包含 text 字符串和 model')
+                self.reply(200, {'ok': True, 'data': {'text': update_config_text(body['text'], body['model'])}})
+            elif path == '/api/config':
                 self.reply(200, {'ok': True, 'data': self.server.backend.config(body)})
             else:
                 command = path.rsplit('/', 1)[1]

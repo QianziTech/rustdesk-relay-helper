@@ -8,11 +8,11 @@
     :root { color-scheme: light; --ink: #182e2a; --muted: #687872; --line: #dce4df; --green: #146a4e; --wash: #f4f7f4; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--wash); color: var(--ink); font: 15px/1.6 system-ui, "Noto Sans CJK SC", sans-serif; }
-    button, textarea { font: inherit; }
+    button, textarea, input { font: inherit; }
     button { cursor: pointer; padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: white; font-weight: 600; }
     button:hover { border-color: var(--green); }
     button:disabled { cursor: wait; opacity: .5; }
-    button:focus-visible, textarea:focus-visible { outline: 3px solid #89c4a9; outline-offset: 3px; }
+    button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #89c4a9; outline-offset: 3px; }
     .primary { color: white; border-color: var(--green); background: var(--green); }
     .wrap { max-width: 1160px; margin: auto; padding: 34px 28px 60px; }
     header, .section-head, .actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -49,10 +49,27 @@
     [hidden] { display: none !important; }
     details summary { cursor: pointer; font-weight: 650; font-size: 17px; }
     .editor { margin-top: 18px; }
+    .editor-modes { margin: 16px 0; }
+    .editor-modes button[aria-pressed="true"] { color: var(--green); border-color: #89c4a9; background: #eaf4ec; }
+    .form-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+    .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 14px 0 22px; }
+    .form-field { display: block; min-width: 0; }
+    .form-field > span { display: block; font-size: 13px; font-weight: 600; }
+    .form-field input { display: block; width: 100%; min-width: 0; margin: 6px 0; padding: 9px 12px; color: var(--ink); background: #fafcfb; border: 1px solid var(--line); border-radius: 8px; }
+    .form-field small { display: block; color: var(--muted); font-size: 12px; }
+    .node-form { border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; min-width: 0; }
+    .node-form legend { padding: 0 6px; font-weight: 600; font-size: 14px; }
+    .node-form .form-grid { grid-template-columns: 1fr 2fr .7fr; margin: 4px 0 12px; }
+    .node-options { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+    .checks { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; }
+    .checks label { display: flex; align-items: center; gap: 6px; }
+    .checks input { accent-color: var(--green); width: 16px; height: 16px; }
+    .node-options button { padding: 5px 11px; font-size: 12px; }
+    .save-actions { margin-top: 18px; }
     textarea { display: block; width: 100%; min-height: 320px; resize: vertical; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fafcfb; color: var(--ink); font: 13px/1.7 ui-monospace, Consolas, monospace; margin: 12px 0; tab-size: 4; }
     #diff { max-height: 300px; overflow: auto; padding: 16px; background: var(--wash); border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 ui-monospace, monospace; }
     footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
-    @media (max-width: 760px) { .wrap { padding: 20px 16px 40px; } .cards { grid-template-columns: 1fr; } .card { padding: 17px; } .panel { padding: 17px; } .brand span { display: block; margin-left: 0; } }
+    @media (max-width: 760px) { .wrap { padding: 20px 16px 40px; } .cards, .form-grid, .node-form .form-grid { grid-template-columns: 1fr; } .card { padding: 17px; } .panel { padding: 17px; } .brand span { display: block; margin-left: 0; } }
   </style>
 </head>
 <body>
@@ -88,10 +105,27 @@
         <details id="config-panel">
           <summary>节点与策略配置</summary>
           <div class="editor">
-            <p class="hint">编辑当前 INI。保存前会校验并备份上一版；保存后，下一次命令或定时任务读取新配置。</p>
-            <label for="config-text" class="label">INI 配置</label>
-            <textarea id="config-text" spellcheck="false" aria-label="INI 配置" disabled></textarea>
-            <div class="actions"><button id="load-config">重新载入</button><button id="preview-config">查看修改</button><button id="save-config" class="primary">校验并保存</button></div>
+            <p class="hint">表单与 INI 文本编辑同一份草稿，切换方式不会保存。校验并保存后，下一次命令或定时任务读取新配置。</p>
+            <div class="actions editor-modes" role="group" aria-label="配置编辑方式">
+              <button id="form-mode" aria-pressed="true" aria-controls="form-view">GUI 表单</button>
+              <button id="text-mode" aria-pressed="false" aria-controls="text-view">INI 文本</button>
+            </div>
+            <div id="form-view">
+              <form id="config-form">
+                <fieldset id="form-fields" class="form-fields" disabled>
+                  <h2>策略参数</h2>
+                  <div id="policy-fields" class="form-grid"></div>
+                  <div class="section-head"><h2>节点配置</h2><button id="add-node" type="button">添加节点</button></div>
+                  <p class="hint">层级数字越小越优先。未参与 RTT 排名的同层节点按下面的顺序接管。</p>
+                  <div id="node-fields"></div>
+                </fieldset>
+              </form>
+            </div>
+            <div id="text-view" hidden>
+              <label for="config-text" class="label">INI 配置</label>
+              <textarea id="config-text" spellcheck="false" aria-label="INI 配置" disabled></textarea>
+            </div>
+            <div class="actions save-actions"><button id="load-config">重新载入</button><button id="preview-config">查看修改</button><button id="save-config" class="primary">校验并保存</button></div>
             <pre id="diff" aria-label="配置修改对比" hidden></pre>
             <p class="hint">修改探测周期时，还需在终端同步修改 systemd timer。配置保存不会自行启动自动任务。</p>
           </div>
@@ -106,7 +140,7 @@
       const token = new URLSearchParams(location.search).get('token');
       history.replaceState(null, '', location.pathname);
       const $ = id => document.getElementById(id);
-      let busy = false, original = null;
+      let busy = false, original = null, editMode = 'form', formDirty = false;
       function notice(message, error = false) {
         $('notice').textContent = message; $('notice').className = error ? 'error' : ''; $('notice').hidden = !message;
       }
@@ -162,11 +196,14 @@
           if (disabled) { button.dataset.wasDisabled = String(button.disabled); button.disabled = true; }
           else { button.disabled = button.dataset.wasDisabled === 'true'; delete button.dataset.wasDisabled; }
         });
+        $('form-fields').disabled = disabled || original === null;
+        $('config-text').disabled = disabled || original === null;
+        if (!disabled) updateNodeActions();
       }
       async function perform(operation, success) {
         if (busy) return;
         busy = true; controls(true); notice('正在处理…');
-        try { await operation(); notice(success || '状态已刷新。'); }
+        try { if (await operation() !== false) notice(success || '状态已刷新。'); }
         catch (error) { notice(error.message, true); }
         finally { busy = false; controls(false); }
       }
@@ -177,14 +214,124 @@
       });
       async function loadConfig() {
         original = await request('/api/config'); $('config-text').value = original.text;
-        $('config-text').disabled = false; $('diff').hidden = true;
+        formDirty = false; $('diff').hidden = true;
+        if (editMode === 'form') {
+          try { renderForm(await request('/api/config/parse', {text: original.text})); }
+          catch (error) { showMode('text'); throw new Error(error.message + '；已保留 INI 原文，请在文本编辑器中修正。'); }
+        }
       }
       $('config-panel').addEventListener('toggle', () => {
         if ($('config-panel').open && original === null) perform(loadConfig, '配置已载入。');
       });
       $('load-config').addEventListener('click', () => {
-        if (original && $('config-text').value !== original.text && !confirm('放弃当前未保存的修改，重新载入？')) return;
+        if (original && (formDirty || $('config-text').value !== original.text) && !confirm('放弃当前未保存的修改，重新载入？')) return;
         perform(loadConfig, '配置已载入。');
+      });
+      const policyFields = [
+        ['probe_interval_seconds', '探测间隔（秒）', 1, 1, '实际周期由 systemd timer 控制，修改后需同步。'],
+        ['connect_timeout_seconds', '连接超时（秒）', 0.000000001, 'any', 'TCP 探测和 hbbs 控制请求的超时。'],
+        ['fail_after', '故障阈值（连续失败次数）', 1, 1, '达到阈值后判定不可用。'],
+        ['recover_after', '恢复阈值（连续成功次数）', 1, 1, '初次启动也需要累计成功次数。'],
+        ['minimum_hold_seconds', '最短保持时间（秒）', 0, 'any', '限制健康节点之间切换；故障逃离不等待。'],
+        ['rtt_sample_count', 'RTT 样本数', 1, 1, '使用最近成功样本的中位数。'],
+        ['rtt_switch_margin_ms', 'RTT 改善阈值（毫秒）', 0, 'any', '同层主动切换至少需要的延迟改善。']
+      ];
+      function field(parent, name, label, type, value, hint = '', attributes = {}) {
+        const wrapper = document.createElement('label'), title = document.createElement('span');
+        wrapper.className = 'form-field'; title.textContent = label;
+        const input = document.createElement('input'); input.dataset.field = name; input.type = type;
+        input.value = value; input.required = true;
+        for (const [key, val] of Object.entries(attributes)) input.setAttribute(key, String(val));
+        wrapper.append(title, input);
+        if (hint) { const help = document.createElement('small'); help.textContent = hint; wrapper.append(help); }
+        parent.append(wrapper);
+      }
+      function markFormDirty() { formDirty = true; $('diff').hidden = true; }
+      function updateNodeActions() {
+        const nodes = Array.from($('node-fields').children);
+        nodes.forEach((node, index) => {
+          for (const [action, unavailable] of [['up', index === 0], ['down', index === nodes.length - 1], ['remove', nodes.length === 1]]) {
+            const button = node.querySelector(`[data-action="${action}"]`);
+            button.disabled = busy || unavailable;
+            if (busy) button.dataset.wasDisabled = String(unavailable);
+          }
+          node.querySelector('legend').textContent = '节点 ' + (index + 1);
+        });
+      }
+      function addNode(node) {
+        const card = document.createElement('fieldset'), legend = document.createElement('legend');
+        card.className = 'node-form'; card.append(legend);
+        const grid = document.createElement('div'); grid.className = 'form-grid'; card.append(grid);
+        field(grid, 'id', '节点 ID', 'text', node.id, '字母、数字、下划线或连字符。', {pattern: '[A-Za-z0-9_\\-]+'});
+        field(grid, 'address', 'Relay 地址', 'text', node.address, 'host:port 或 [IPv6]:port。');
+        field(grid, 'tier', '优先层级', 'number', node.tier, '非负整数，数字越小越优先。', {min: 0, step: 1});
+        const options = document.createElement('div'); options.className = 'node-options';
+        const checks = document.createElement('div'); checks.className = 'checks';
+        for (const [name, label] of [['enabled', '启用节点'], ['rtt_ranked', '参与同层 RTT 排名']]) {
+          const wrapper = document.createElement('label'), input = document.createElement('input');
+          input.type = 'checkbox'; input.dataset.field = name; input.checked = node[name];
+          wrapper.append(input, document.createTextNode(label)); checks.append(wrapper);
+        }
+        const actions = document.createElement('div'); actions.className = 'actions';
+        for (const [action, label] of [['up', '上移'], ['down', '下移'], ['remove', '移除']]) {
+          const button = document.createElement('button'); button.type = 'button'; button.dataset.action = action; button.textContent = label;
+          button.addEventListener('click', () => {
+            if (busy) return;
+            if (action === 'up' && card.previousElementSibling) card.parentNode.insertBefore(card, card.previousElementSibling);
+            if (action === 'down' && card.nextElementSibling) card.parentNode.insertBefore(card.nextElementSibling, card);
+            if (action === 'remove' && $('node-fields').children.length > 1) card.remove();
+            markFormDirty(); updateNodeActions();
+          });
+          actions.append(button);
+        }
+        options.append(checks, actions); card.append(options); $('node-fields').append(card); updateNodeActions();
+      }
+      function renderForm(model) {
+        $('policy-fields').replaceChildren(); $('node-fields').replaceChildren();
+        for (const [name, label, min, step, hint] of policyFields) field($('policy-fields'), name, label, 'number', model.policy[name], hint, {min, step});
+        for (const node of model.nodes) addNode(node);
+        formDirty = false;
+      }
+      function readForm() {
+        if (!$('config-form').reportValidity()) throw new Error('请填写完整配置，并修正标出的字段。');
+        const policy = {};
+        $('policy-fields').querySelectorAll('input').forEach(input => { policy[input.dataset.field] = input.valueAsNumber; });
+        const nodes = Array.from($('node-fields').children, card => {
+          const node = {};
+          card.querySelectorAll('input').forEach(input => {
+            node[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? input.valueAsNumber : input.value;
+          });
+          return node;
+        });
+        return {policy, nodes};
+      }
+      async function syncForm() {
+        if (editMode !== 'form' || !formDirty) return;
+        // Temporarily enable fields for native validity checks while the request controls are locked.
+        $('form-fields').disabled = false;
+        let model;
+        try { model = readForm(); } finally { $('form-fields').disabled = busy; }
+        const draft = await request('/api/config/render', {text: $('config-text').value, model});
+        $('config-text').value = draft.text; formDirty = false;
+      }
+      function showMode(mode) {
+        editMode = mode; $('form-view').hidden = mode !== 'form'; $('text-view').hidden = mode !== 'text';
+        $('form-mode').setAttribute('aria-pressed', String(mode === 'form'));
+        $('text-mode').setAttribute('aria-pressed', String(mode === 'text'));
+      }
+      $('config-form').addEventListener('submit', event => event.preventDefault());
+      $('config-form').addEventListener('input', markFormDirty);
+      $('config-text').addEventListener('input', () => { $('diff').hidden = true; });
+      $('add-node').addEventListener('click', () => { if (!busy) { addNode({id: '', address: '', tier: 20, enabled: true, rtt_ranked: true}); markFormDirty(); } });
+      $('form-mode').addEventListener('click', () => {
+        if (editMode === 'form') return;
+        if (!original) { notice('请先载入配置。', true); return; }
+        perform(async () => { renderForm(await request('/api/config/parse', {text: $('config-text').value})); showMode('form'); }, 'INI 草稿已映射到表单，尚未保存。');
+      });
+      $('text-mode').addEventListener('click', () => {
+        if (editMode === 'text') return;
+        if (!original) { notice('请先载入配置。', true); return; }
+        perform(async () => { await syncForm(); showMode('text'); }, '表单草稿已映射到 INI，尚未保存。');
       });
       function preview() {
         if (!original) throw new Error('请先载入配置。');
@@ -196,15 +343,14 @@
         }
         $('diff').textContent = lines.join('\n'); $('diff').hidden = false;
       }
-      $('preview-config').addEventListener('click', () => { try { preview(); } catch (e) { notice(e.message, true); } });
+      $('preview-config').addEventListener('click', () => perform(async () => { await syncForm(); preview(); }, '修改预览已生成，尚未保存。'));
       $('save-config').addEventListener('click', () => {
         if (!original) { notice('请先载入配置。', true); return; }
-        preview();
-        if ($('config-text').value === original.text) { notice('配置没有变化。'); return; }
-        if (!confirm('确认保存上述修改？下一次命令或定时任务会读取新配置。')) return;
-        const draft = $('config-text').value;
         perform(async () => {
-          original = await request('/api/config', {text: draft, revision: original.revision});
+          await syncForm(); preview();
+          if ($('config-text').value === original.text) { notice('配置没有变化。'); return false; }
+          if (!confirm('确认保存上述修改？下一次命令或定时任务会读取新配置。')) { notice('已保留草稿，尚未保存。'); return false; }
+          original = await request('/api/config', {text: $('config-text').value, revision: original.revision});
           $('diff').hidden = true;
           await request('/api/nodes');
         }, '配置已校验并保存，上一版保存在配置文件旁的 .webui.bak 文件。');
