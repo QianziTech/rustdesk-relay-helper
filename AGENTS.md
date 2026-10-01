@@ -3,7 +3,7 @@
 ## 范围与依据
 - 默认简体中文沟通。以 `docs/方案与技术选型.md` 的第一版策略合同为准。
 - 目标运行环境为 Linux 宿主机、Python 3.9+、Bash 和 systemd；Python 运行时仅使用标准库。
-- 只管理 hbbs 下发的一个 relay。不要新增 Web、数据库、Docker socket、容器重建或 hbbs 高可用功能。
+- 只管理 hbbs 下发的一个 relay。WebUI 试验范围见 `docs/WebUI方案.md`：只监听 `127.0.0.1`，页面与 API 均需 token，复用共享操作与文件锁。不要新增数据库、Docker socket、容器重建或 hbbs 高可用功能。
 - 生产地址和客户端验证结果由管理员提供；本地测试成功不等于真实中继会话已验收。
 
 ## 代码边界

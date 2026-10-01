@@ -59,6 +59,21 @@ sudo rustdesk-relay-helper history --lines 50
 
 TCP 探测只代表 **CNHZ → relay TCP 端口** 可达。耗时包含主机名解析及 TCP connect，不代表 RustDesk 握手或客户端端到端质量。`status` 中“上次决策原因”来自最近一次 `auto` / `switch` / `reconcile`，`probe` 不重新决策。
 
+## 可选本机 WebUI（试验版）
+
+共享 Python 后端增加 WebUI，固定监听 `127.0.0.1`，默认端口 `8765`。支持状态、探测、手动固定、恢复自动与 INI 编辑；没有独立账户体系。
+
+```bash
+# 开发时先复制本地配置，避免改动示例；已有 local.ini 时跳过复制。
+test -e config/local.ini || cp config/relay-helper.example.ini config/local.ini
+python3 -m relay_helper --config config/local.ini --state var/state.json web
+# 已安装的生产路径：sudo rustdesk-relay-helper web
+```
+
+首次启动生成权限 `0600` 的 `<状态目录>/webui.token`，交互终端输出 `http://127.0.0.1:8765/?token=...`。裸地址和错误 token 均拒绝返回页面。进入后地址栏清除 token，API 改用 bearer；刷新页面须重新打开原始 token 链接。启动 WebUI 不会启用自动 timer。
+
+远程访问用 `ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 user@server`。配置保存共用 CLI 的锁，先校验与检查版本，上一版保存在 `<配置>.webui.bak`。部署 service、token 轮换与安全边界见 [WebUI 方案](docs/WebUI方案.md)。
+
 ## 首次启用自动执行
 
 先核实服务器版本及 `rs` 只读输出，替换真实节点，确认客户端 Relay Server 留空。按规划先用真实客户端验证目标 relay，再执行 `probe`（默认需累计 6 个成功周期）和首次 `switch`，确认新建中继会话的实际路径。只有现场写入及客户端验证通过后，再启用 timer：

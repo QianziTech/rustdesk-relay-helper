@@ -59,9 +59,13 @@ class Config:
 
 
 def load_config(path):
+    return parse_config(Path(path).read_text(encoding='utf-8'))
+
+
+def parse_config(text):
+    """Validate CLI files and WebUI drafts with the same rules."""
     parser = configparser.ConfigParser(interpolation=None)
-    with Path(path).open(encoding='utf-8') as stream:
-        parser.read_file(stream)
+    parser.read_string(text)
     if parser.defaults():
         raise ValueError('不支持 INI DEFAULT，请在具体节内配置')
     if not parser.has_section('policy'):

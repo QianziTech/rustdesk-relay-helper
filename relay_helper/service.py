@@ -75,3 +75,22 @@ def set_manual(config, state, node_id):
     state['mode'] = 'manual'
     state['manual_target'] = node.id
     LOG.info('mode=manual target=%s', node.id)
+
+
+def operate(config, state, console, command, node_id=None):
+    """Shared command semantics; callers own the lock and state persistence."""
+    if command == 'nodes':
+        return
+    if command == 'status':
+        read_actual(state, console)
+        return
+    if command not in ('probe', 'switch', 'auto', 'reconcile'):
+        raise ValueError('未知操作: ' + command)
+    probe(config, state)
+    if command == 'switch':
+        set_manual(config, state, node_id)
+    elif command == 'auto':
+        state.update(mode='auto', manual_target=None)
+        LOG.info('mode=auto')
+    if command != 'probe':
+        reconcile(config, state, console)

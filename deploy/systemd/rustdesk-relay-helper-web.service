@@ -1,0 +1,21 @@
+[Unit]
+Description=Local token-protected RustDesk Relay Helper WebUI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rustdesk-relay-helper
+StateDirectory=rustdesk-relay-helper
+StateDirectoryMode=0750
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+ExecStart=/usr/bin/python3 -m relay_helper web --port 8765
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+SyslogIdentifier=rustdesk-relay-helper-web
+
+[Install]
+WantedBy=multi-user.target

@@ -13,7 +13,7 @@ import sys
 from .config import load_config
 from .io import Console, command_lock, load_state, save_state
 from .policy import effective_rtt
-from .service import LOG, probe, read_actual, reconcile, set_manual
+from .service import LOG, operate
 
 
 def setup_logging():
@@ -68,9 +68,15 @@ def main(argv=None):
     sub.add_parser('switch').add_argument('id')
     history = sub.add_parser('history')
     history.add_argument('--lines', type=int, default=50)
+    web = sub.add_parser('web', help='启动仅监听 127.0.0.1 的 token WebUI')
+    web.add_argument('--port', type=int, default=8765)
+    web.add_argument('--token-file', help='默认在状态目录下创建 webui.token（权限 0600）')
     args = parser.parse_args(argv)
     setup_logging()
     try:
+        if args.command == 'web':
+            from .web import serve
+            return serve(args.config, args.state, args.port, args.token_file)
         if args.command == 'history':
             if args.lines < 1:
                 raise ValueError('--lines 必须是正整数')
@@ -84,19 +90,12 @@ def main(argv=None):
                 return 0
             if args.command == 'status':
                 try:
-                    read_actual(state, console)
+                    operate(config, state, console, 'status')
                 finally:
                     show_status(config, state)
                 return 0
             try:
-                probe(config, state)
-                if args.command == 'switch':
-                    set_manual(config, state, args.id)
-                elif args.command == 'auto':
-                    state.update(mode='auto', manual_target=None)
-                    LOG.info('mode=auto')
-                if args.command != 'probe':
-                    reconcile(config, state, console)
+                operate(config, state, console, args.command, getattr(args, 'id', None))
             finally:
                 save_state(args.state, state)
             show_status(config, state)
