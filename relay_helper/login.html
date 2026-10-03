@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay Helper · 登录</title>
+  <style nonce="__NONCE__">
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 48px 20px; background: #f4f7f4; color: #182e2a; font: 15px/1.6 system-ui, sans-serif; }
+    main { max-width: 460px; margin: 8vh auto; padding: 28px; background: white; border: 1px solid #dce4df; border-radius: 12px; }
+    h1 { margin: 0; font-size: 26px; }
+    p, small { color: #687872; }
+    label { display: block; margin: 18px 0; }
+    input[type=password] { display: block; width: 100%; margin-top: 8px; padding: 10px; border: 1px solid #dce4df; border-radius: 8px; font: inherit; }
+    button { padding: 10px 18px; border: 0; border-radius: 8px; background: #146a4e; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: wait; }
+    input:focus-visible, button:focus-visible { outline: 3px solid #89c4a9; outline-offset: 3px; }
+    #notice { color: #942f27; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>登录 Relay Helper</h1>
+    <p>通过 SSH 隧道访问，输入访问 token 后登录。</p>
+    <form id="login-form">
+      <label>访问 token<input id="login-token" type="password" autocomplete="off" spellcheck="false" required></label>
+      <label><input id="login-remember" type="checkbox"> 记住登录（最多 7 天；服务重启后需重新登录）</label>
+      <button id="login-submit" type="submit">登录</button>
+    </form>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <small>默认登录最长 8 小时。关闭浏览器或 SSH 隧道不保证退出。</small>
+  </main>
+  <script nonce="__NONCE__">
+    (() => {
+      'use strict';
+      const $ = id => document.getElementById(id);
+      $('login-token').value = new URLSearchParams(location.search).get('token') || '';
+      history.replaceState(null, '', '/');
+      $('login-form').addEventListener('submit', async event => {
+        event.preventDefault();
+        if ($('login-submit').disabled) return;
+        $('login-submit').disabled = true; $('notice').textContent = '正在登录…';
+        try {
+          const response = await fetch('/api/session/login', {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+            headers: {Authorization: 'Bearer ' + $('login-token').value, 'Content-Type': 'application/json'},
+            body: JSON.stringify({remember: $('login-remember').checked})
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error || '登录失败');
+          $('login-token').value = '';
+          location.replace('/');
+        } catch (error) { $('notice').textContent = error.message; }
+        finally { $('login-submit').disabled = false; }
+      });
+    })();
+  </script>
+</body>
+</html>

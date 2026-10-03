@@ -92,13 +92,17 @@ sudo journalctl -u rustdesk-relay-helper-web.service -n 50 --no-pager
 sudo cat /var/lib/rustdesk-relay-helper/webui.token
 ```
 
-token 文件属于服务运行用户（默认 root），权限为 `0600`；读取到的内容就是访问凭据。在本机浏览器打开 `http://127.0.0.1:8765/?token=<文件内容>`。远程访问时，在个人电脑建立 SSH 转发并保持连接：
+token 文件属于服务运行用户（默认 root），权限为 `0600`；读取到的内容就是首次登录凭据。远程访问时，在个人电脑建立 SSH 转发并保持连接：
 
 ```bash
 ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 user@server
 ```
 
-随后在个人电脑浏览器打开同一入口地址。停止常驻服务并取消开机启动使用 `sudo systemctl disable --now rustdesk-relay-helper-web.service`，不会停止 relay 自动选择 timer。
+随后在个人电脑浏览器打开 `http://127.0.0.1:8765/`，输入 token 并点击登录。原有 `/?token=<文件内容>` 链接仍可打开登录确认页，清理地址后需显式登录，不自动创建会话。
+
+登录后刷新无需再次输入 token；默认最长 8 小时，可勾选“记住登录”（最多 7 天）。两种会话都不会随访问续期，Web 服务重启后全部失效，必须重新输入 token；原始 token 文件仍跨重启保留。页面“退出登录”会撤销当前会话并清除 Cookie。关闭浏览器或 SSH 隧道不保证退出。更换本地端口或主机名需重新登录。
+
+停止常驻服务并取消开机启动使用 `sudo systemctl disable --now rustdesk-relay-helper-web.service`，不会停止 relay 自动选择 timer。会话与 SSH 安全边界见 [登录持久化设计](docs/Web登录持久化设计.md)。
 
 配置保存共用 CLI 的锁，先校验与检查版本，上一版保存在 `<配置>.webui.bak`。token 轮换与完整安全边界见 [WebUI 方案](docs/WebUI方案.md)。
 
