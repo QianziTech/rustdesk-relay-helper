@@ -25,7 +25,7 @@ WebUI 是可选独立常驻进程。仅启动 WebUI 不会周期性探测或切�
 
 - 固定绑定 IPv4 `127.0.0.1`，没有更改监听地址的选项；默认端口 `8765`。必须与 hbbs 共享网络命名空间。
 - 入口为 `http://127.0.0.1:8765/?token=<token>`。裸地址、错误 token、重复 token 返回 401，不返回页面。token 用恒定时间比较。
-- 首次启动生成 256 位随机 token，默认保存于状态目录的 `webui.token`，文件归当前用户所有且权限必须为 `0600`。已有文件不能是符号链接；重启沿用 token。可通过 `--token-file` 指定路径。
+- 首次启动生成 256 位随机 token，默认保存于状态目录的 `webui.token`，文件归当前用户所有且权限必须为 `0600`。先在同目录临时文件中完整写入并同步，再用硬链接原子发布且不覆盖并发创建的 token，最后同步目录；发布前中断不会留下空或截断的目标文件。已有文件不能是符号链接；重启沿用 token。可通过 `--token-file` 指定路径。
 - 页面立即用 `history.replaceState` 清除 URL 中的 token，在页面内存中持有 token，API 仅接受 `Authorization: Bearer <token>`。不使用 cookie、localStorage 或 sessionStorage；页面刷新后须重新打开带 token 的入口链接。
 - 本机或 SSH 转发都允许 `127.0.0.1:<端口>` / `localhost:<端口>` Host，拒绝其他域名以限制 DNS rebinding。存在 Origin 时要求与 Host 同源，拒绝跨站 Fetch Metadata。没有 CORS 放行。写入仅接受带 bearer 的 JSON POST。
 - 页面没有外部字体、脚本、图片或 CDN。响应设置 `no-store`、`no-referrer`、禁止 iframe，并使用带随机 nonce 的 CSP。服务不记录请求 URL；完整入口地址仅在交互终端输出，systemd journal 只输出监听地址和 token 文件位置。

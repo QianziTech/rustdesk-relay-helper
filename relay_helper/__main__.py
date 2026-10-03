@@ -60,18 +60,34 @@ def show_status(config, state):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='RustDesk OSS relay 管理器（CNHZ 宿主机）')
-    parser.add_argument('--config', default=os.environ.get('RELAY_HELPER_CONFIG', '/etc/rustdesk-relay-helper/config.ini'))
-    parser.add_argument('--state', default=os.environ.get('RELAY_HELPER_STATE', '/var/lib/rustdesk-relay-helper/state.json'))
+    parser.add_argument('--config', default=os.environ.get('RELAY_HELPER_CONFIG', '/etc/rustdesk-relay-helper/config.ini'),
+                        help='INI 配置路径（环境变量 RELAY_HELPER_CONFIG，默认 %(default)s）')
+    parser.add_argument('--state', default=os.environ.get('RELAY_HELPER_STATE', '/var/lib/rustdesk-relay-helper/state.json'),
+                        help='共享状态路径（环境变量 RELAY_HELPER_STATE，默认 %(default)s）')
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('status', 'nodes', 'probe', 'auto', 'reconcile'):
-        sub.add_parser(command)
-    sub.add_parser('switch').add_argument('id')
-    history = sub.add_parser('history')
-    history.add_argument('--lines', type=int, default=50)
-    web = sub.add_parser('web', help='启动仅监听 127.0.0.1 的 token WebUI')
-    web.add_argument('--port', type=int, default=8765)
+    descriptions = {
+        'status': '实时读取实际 relay，展示模式和节点状态；不探测、不写 relay',
+        'nodes': '展示配置与已有探测结果；不联系 hbbs',
+        'probe': '探测启用节点并保存健康计数和 RTT；不读写 hbbs',
+        'switch': '探测后固定到健康节点，保存手动模式并回读确认',
+        'auto': '探测后恢复自动模式并立即决策',
+        'history': '通过 journalctl 查看最近管理事件',
+        'reconcile': '供 timer 使用：探测、读取、决策，必要时写入并回读确认',
+        'web': '启动仅监听 127.0.0.1 的 token WebUI；不启用自动 timer',
+        'help': '列出所有命令，或查看指定命令的用法',
+    }
+    commands = {name: sub.add_parser(name, help=description, description=description)
+                for name, description in descriptions.items()}
+    commands['switch'].add_argument('id', help='配置中的已启用、健康节点 ID')
+    commands['history'].add_argument('--lines', type=int, default=50, help='显示最近事件条数（默认 %(default)s）')
+    web = commands['web']
+    web.add_argument('--port', type=int, default=8765, help='本机监听端口（默认 %(default)s）')
     web.add_argument('--token-file', help='默认在状态目录下创建 webui.token（权限 0600）')
+    commands['help'].add_argument('topic', nargs='?', choices=tuple(commands), help='要查看的命令')
     args = parser.parse_args(argv)
+    if args.command == 'help':
+        (commands[args.topic] if args.topic else parser).print_help()
+        return 0
     setup_logging()
     try:
         if args.command == 'web':

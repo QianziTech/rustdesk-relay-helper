@@ -30,6 +30,47 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(load_token(self.path), token)
 
+    def test_failed_creation_leaves_no_partial_token_and_can_retry(self):
+        for operation in ('fsync', 'link'):
+            with self.subTest(operation=operation):
+                with patch('relay_helper.web.os.' + operation, side_effect=OSError('interrupted')):
+                    with self.assertRaises(OSError):
+                        load_token(self.path)
+                self.assertFalse(self.path.exists())
+                self.assertEqual(list(self.path.parent.iterdir()), [])
+                token = load_token(self.path)
+                self.assertEqual(load_token(self.path), token)
+                self.path.unlink()
+
+    def test_publication_exposes_only_complete_synced_private_token(self):
+        publish = os.link
+        sync = os.fsync
+        with patch('relay_helper.web.os.fsync', wraps=sync) as synced:
+            def publish_checked(source, destination):
+                self.assertFalse(self.path.exists())
+                self.assertEqual(Path(source).stat().st_mode & 0o777, 0o600)
+                self.assertRegex(Path(source).read_text(encoding='ascii'), r'^[A-Za-z0-9_-]{43}\n$')
+                synced.assert_called_once()
+                publish(source, destination)
+
+            with patch('relay_helper.web.os.link', side_effect=publish_checked):
+                token = load_token(self.path)
+            self.assertEqual(synced.call_count, 2)
+        self.assertEqual(self.path.read_text(encoding='ascii'), token + '\n')
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_concurrent_creator_is_reused_without_overwrite(self):
+        def another_creator(source, destination):
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='ascii') as stream:
+                stream.write(TOKEN + '\n')
+            raise FileExistsError('another process published first')
+
+        with patch('relay_helper.web.os.link', side_effect=another_creator):
+            self.assertEqual(load_token(self.path), TOKEN)
+        self.assertEqual(load_token(self.path), TOKEN)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
     def test_loose_permissions_and_short_token_rejected(self):
         load_token(self.path)
         self.path.chmod(0o644)

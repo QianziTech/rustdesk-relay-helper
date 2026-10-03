@@ -35,6 +35,8 @@ sudoedit /etc/rustdesk-relay-helper/config.ini
 ## 命令
 
 ```bash
+rustdesk-relay-helper help
+rustdesk-relay-helper help switch
 sudo rustdesk-relay-helper status
 sudo rustdesk-relay-helper nodes
 sudo rustdesk-relay-helper probe
@@ -45,6 +47,7 @@ sudo rustdesk-relay-helper history --lines 50
 
 | 命令 | 行为 |
 | --- | --- |
+| `help [命令]` | 列出所有可用命令及说明，或查看指定命令的参数；无需配置、状态文件或管理员权限。也支持 `--help` 和 `<命令> --help`。 |
 | `status` | 实时读取 `rs`，展示模式、实际值、目标、上次决策原因、时间和节点详情；不探测、不写 relay。读取失败显示未确认并返回非零退出码。 |
 | `nodes` | 展示配置与已有探测结果，不联系 `hbbs`。 |
 | `probe` | 探测所有启用节点并保存健康计数和有限 RTT 样本，不读取或写入 `hbbs`。 |
@@ -52,6 +55,7 @@ sudo rustdesk-relay-helper history --lines 50
 | `auto` | 先探测，恢复自动模式并立即决策。 |
 | `history` | 用 journal 标识 `rustdesk-relay-helper` 读取最近事件；读取 journal 可能需要管理员权限。 |
 | `reconcile` | 定时内部命令：探测、读取实际值、按当前模式决策、必要时写入并回读确认。 |
+| `web` | 启动仅监听 `127.0.0.1` 的 token WebUI；可用 `--port`、`--token-file`，不会启用自动 timer。 |
 
 所有状态操作使用同一把非阻塞文件锁，冲突返回“管理器忙”。默认配置和状态路径分别为 `/etc/rustdesk-relay-helper/config.ini`、`/var/lib/rustdesk-relay-helper/state.json`。可在子命令前传入 `--config`、`--state`，或设置 `RELAY_HELPER_CONFIG`、`RELAY_HELPER_STATE`。同一实例的手动命令和 timer 必须共用状态路径。Bash 入口的安装目录可由 `RELAY_HELPER_HOME` 修改。
 
@@ -72,7 +76,31 @@ python3 -m relay_helper --config config/local.ini --state var/state.json web
 
 首次启动生成权限 `0600` 的 `<状态目录>/webui.token`，交互终端输出 `http://127.0.0.1:8765/?token=...`。裸地址和错误 token 均拒绝返回页面。进入后地址栏清除 token，API 改用 bearer；刷新页面须重新打开原始 token 链接。启动 WebUI 不会启用自动 timer。
 
-远程访问用 `ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 user@server`。配置保存共用 CLI 的锁，先校验与检查版本，上一版保存在 `<配置>.webui.bak`。部署 service、token 轮换与安全边界见 [WebUI 方案](docs/WebUI方案.md)。
+完成上面的 Linux 安装并配置真实节点后，可由 systemd 常驻运行 WebUI，无需每次手动启动。先结束占用同一端口的前台 WebUI，然后在 `/opt/rustdesk-relay-helper` 执行：
+
+```bash
+sudo install -m 0644 deploy/systemd/rustdesk-relay-helper-web.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rustdesk-relay-helper-web.service
+sudo systemctl status rustdesk-relay-helper-web.service --no-pager
+```
+
+该服务开机自动启动、失败后自动重启，仍只监听 `127.0.0.1:8765`，独立于 relay 自动选择 timer。重启沿用已有 token；systemd journal 只记录监听地址和 token 文件位置，不输出完整 token。查看服务日志和读取 token：
+
+```bash
+sudo journalctl -u rustdesk-relay-helper-web.service -n 50 --no-pager
+sudo cat /var/lib/rustdesk-relay-helper/webui.token
+```
+
+token 文件属于服务运行用户（默认 root），权限为 `0600`；读取到的内容就是访问凭据。在本机浏览器打开 `http://127.0.0.1:8765/?token=<文件内容>`。远程访问时，在个人电脑建立 SSH 转发并保持连接：
+
+```bash
+ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 user@server
+```
+
+随后在个人电脑浏览器打开同一入口地址。停止常驻服务并取消开机启动使用 `sudo systemctl disable --now rustdesk-relay-helper-web.service`，不会停止 relay 自动选择 timer。
+
+配置保存共用 CLI 的锁，先校验与检查版本，上一版保存在 `<配置>.webui.bak`。token 轮换与完整安全边界见 [WebUI 方案](docs/WebUI方案.md)。
 
 “节点与策略配置”默认使用 GUI 表单，提供策略数字输入、节点 ID / 地址 / 层级、启用与 RTT 排名开关，以及节点增删和顺序调整。可切换到 INI 文本编辑，两种方式双向映射同一份草稿；切换和预览均不保存。现有配置节的注释与未修改字段保留，最终统一使用“校验并保存”提交。非法 INI 不能映射到表单，但原文仍保留供修正。
 

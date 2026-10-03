@@ -8,6 +8,7 @@ import re
 import secrets
 import stat
 import sys
+import tempfile
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,22 +28,37 @@ def load_token(path):
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
-    except FileExistsError:
         fd = os.open(path, os.O_RDONLY | flags)
-        with os.fdopen(fd, 'r', encoding='ascii') as stream:
-            metadata = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-                    or stat.S_IMODE(metadata.st_mode) != 0o600):
-                raise ValueError('token 文件必须属于当前用户，且权限为 0600')
-            token = stream.read(130).strip()
-    else:
-        token = secrets.token_urlsafe(32)
-        with os.fdopen(fd, 'w', encoding='ascii') as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(token + '\n')
-            stream.flush()
-            os.fsync(stream.fileno())
+    except FileNotFoundError:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='ascii', dir=path.parent,
+                                             prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
+                temporary = stream.name
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(secrets.token_urlsafe(32) + '\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                # Publish complete contents atomically without replacing a concurrent winner.
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        fd = os.open(path, os.O_RDONLY | flags)
+    with os.fdopen(fd, 'r', encoding='ascii') as stream:
+        metadata = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600):
+            raise ValueError('token 文件必须属于当前用户，且权限为 0600')
+        token = stream.read(130).strip()
     if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', token):
         raise ValueError('token 必须是 32–128 位字母、数字、下划线或连字符')
     return token
