@@ -18,6 +18,8 @@ htmlcov/
 /state.json
 /state.json.lock
 /state.json.*.tmp
+*.webui.bak
+*.token
 .env
 .env.*
 !.env.example

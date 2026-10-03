@@ -1,5 +1,6 @@
 """Local hbbs console, TCP probes, atomic JSON state and command lock."""
 
+import hashlib
 import json
 import os
 import socket
@@ -8,7 +9,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import endpoint
+from .config import endpoint, parse_config
 from .policy import new_health
 
 
@@ -127,6 +128,45 @@ def save_state(path, state):
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def config_document(path):
+    content = Path(path).read_bytes()
+    return {'text': content.decode('utf-8'), 'revision': hashlib.sha256(content).hexdigest()}
+
+
+def replace_config(path, text, revision, state):
+    """Caller holds the state lock; validate, back up, then atomically replace."""
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError('WebUI 不支持修改符号链接配置；请在终端编辑')
+    config = parse_config(text)
+    previous = config_document(path)
+    if previous['revision'] != revision:
+        raise RuntimeError('配置已被其他操作修改；请重新载入后编辑')
+    if state['mode'] == 'manual':
+        target = state['manual_target']
+        old_address = state['nodes'].get(target, {}).get('address')
+        if not any(n.id == target and n.enabled and n.address == old_address for n in config.nodes):
+            raise ValueError('请先恢复自动模式，再删除、禁用或修改手动目标地址')
+    metadata = path.stat()
+    for destination, content in ((path.with_name(path.name + '.webui.bak'), previous['text']), (path, text)):
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                             prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
+                temporary = stream.name
+                os.fchmod(stream.fileno(), metadata.st_mode & 0o777)
+                if (os.getuid(), os.getgid()) != (metadata.st_uid, metadata.st_gid):
+                    os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+    return config_document(path)
 
 
 @contextmanager
