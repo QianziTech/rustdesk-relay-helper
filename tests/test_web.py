@@ -6,13 +6,15 @@ import os
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from relay_helper.__main__ import main
 from relay_helper.config import load_config
 from relay_helper.io import ConsoleError, command_lock, load_state, save_state
-from relay_helper.web import Backend, LocalServer, MAX_BODY, load_token, serve
+from relay_helper.web import (Backend, LocalServer, MAX_BODY, REMEMBER_SECONDS,
+                              SESSION_SECONDS, Sessions, load_token, serve)
 
 CONFIG = '[policy]\nrecover_after=1\nrtt_sample_count=1\n[node:a]\naddress=a.test:21117\ntier=10\n'
 TOKEN = 'test_only_' + 'x' * 34
@@ -115,6 +117,66 @@ class BackendFixture(unittest.TestCase):
         self.backend = Backend(self.config_path, self.state_path)
 
 
+class SessionTests(unittest.TestCase):
+    def test_deadlines_are_absolute_and_follow_monotonic_clock(self):
+        for remember, seconds in ((False, SESSION_SECONDS), (True, REMEMBER_SECONDS)):
+            with self.subTest(remember=remember):
+                sessions = Sessions()
+                with patch('relay_helper.web.time.monotonic', return_value=100), patch('relay_helper.web.time.time', return_value=1000):
+                    code, identifier, session = sessions.login(TOKEN, TOKEN, 'http://localhost:9876', remember)
+                self.assertEqual(code, 200)
+                self.assertEqual(session.expires_at, 1000 + seconds)
+                self.assertNotIn(identifier, sessions.records)
+                with patch('relay_helper.web.time.monotonic', return_value=100 + seconds - 1):
+                    self.assertEqual(sessions.get(identifier, session.origin), session)
+                    self.assertEqual(sessions.get(identifier, session.origin), session)
+                with patch('relay_helper.web.time.monotonic', return_value=100 + seconds):
+                    self.assertIsNone(sessions.get(identifier, session.origin))
+                self.assertEqual(sessions.records, {})
+
+    def test_origin_mismatch_does_not_revoke_valid_session(self):
+        sessions = Sessions()
+        _, identifier, session = sessions.login(TOKEN, TOKEN, 'http://localhost:9876', False)
+        self.assertIsNone(sessions.get(identifier, 'http://localhost:8765'))
+        sessions.revoke(identifier, 'http://127.0.0.1:9876')
+        self.assertEqual(sessions.get(identifier, session.origin), session)
+
+    def test_parallel_capacity_replacement_and_revocation(self):
+        sessions = Sessions()
+        origin = 'http://localhost:9876'
+        with patch('relay_helper.web.MAX_SESSIONS', 8):
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                results = list(executor.map(lambda _: sessions.login(TOKEN, TOKEN, origin, False), range(24)))
+            accepted = [(identifier, session) for code, identifier, session in results if code == 200]
+            self.assertEqual(len(accepted), 8)
+            self.assertEqual(sum(code == 429 for code, _, _ in results), 16)
+            self.assertEqual(len({identifier for identifier, _ in accepted}), 8)
+            previous, session = accepted[0]
+            code, identifier, new = sessions.login(TOKEN, TOKEN, origin, True, previous)
+            self.assertEqual(code, 200)
+            self.assertNotEqual(identifier, previous)
+            self.assertNotEqual(new.csrf, session.csrf)
+            self.assertIsNone(sessions.get(previous, origin))
+            self.assertEqual(len(sessions.records), 8)
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(lambda _: sessions.revoke(identifier, origin), range(24)))
+            self.assertIsNone(sessions.get(identifier, origin))
+            self.assertEqual(len(sessions.records), 7)
+
+    def test_failed_logins_are_bounded_and_rate_limit_recovers(self):
+        sessions = Sessions()
+        origin = 'http://localhost:9876'
+        with patch('relay_helper.web.time.monotonic', return_value=100):
+            for _ in range(5):
+                self.assertEqual(sessions.login('wrong', TOKEN, origin, False)[0], 401)
+            for _ in range(10):
+                self.assertEqual(sessions.login(TOKEN, TOKEN, origin, False)[0], 429)
+            self.assertEqual(len(sessions.failures), 5)
+            self.assertEqual(sessions.records, {})
+        with patch('relay_helper.web.time.monotonic', return_value=160):
+            self.assertEqual(sessions.login(TOKEN, TOKEN, origin, False)[0], 200)
+
+
 class BackendTests(BackendFixture):
 
     def test_probe_switch_auto_share_persistent_mode_and_confirmation(self):
@@ -203,18 +265,36 @@ class HTTPTests(BackendFixture):
         self.thread = threading.Thread(target=lambda: self.server.serve_forever(poll_interval=0.01), daemon=True)
         self.thread.start()
         self.addCleanup(self.stop_server)
+        self.auth_headers = None
 
     def stop_server(self):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(2)
 
-    def request(self, path, method='GET', body=None, headers=None, auth=False):
+    @property
+    def origin(self):
+        return 'http://127.0.0.1:{}'.format(self.server.server_address[1])
+
+    def login(self, remember=False, headers=None):
+        headers = dict(headers or {})
+        headers.setdefault('Authorization', 'Bearer ' + TOKEN)
+        code, response_headers, body = self.request('/api/session/login', 'POST', {'remember': remember}, headers)
+        self.assertEqual(code, 200, body)
+        data = json.loads(body)['data']
+        return {'Cookie': response_headers['Set-Cookie'].split(';')[0], 'X-CSRF-Token': data['csrf']}, data
+
+    def request(self, path, method='GET', body=None, headers=None, auth=False, auto_origin=True):
         connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
         self.addCleanup(connection.close)
         headers = dict(headers or {})
         if auth:
-            headers['Authorization'] = 'Bearer ' + TOKEN
+            if self.auth_headers is None:
+                self.auth_headers, _ = self.login()
+            for key, value in self.auth_headers.items():
+                headers.setdefault(key, value)
+        if method == 'POST' and auto_origin:
+            headers.setdefault('Origin', 'http://' + headers.get('Host', self.origin[7:]))
         if isinstance(body, dict):
             body = json.dumps(body)
             headers.setdefault('Content-Type', 'application/json')
@@ -225,7 +305,11 @@ class HTTPTests(BackendFixture):
     def test_loopback_binding_and_unauthorized_requests_do_no_work(self):
         self.assertEqual(self.server.server_address[0], '127.0.0.1')
         with patch.object(self.backend, 'run') as run, patch.object(self.backend, 'config') as config:
-            for path, method in (('/', 'GET'), ('/api/nodes', 'GET'), ('/api/config', 'GET'), ('/api/auto', 'POST')):
+            code, _, body = self.request('/')
+            self.assertEqual(code, 200)
+            self.assertIn('login-form', body)
+            self.assertNotIn('config-panel', body)
+            for path, method in (('/api/session', 'GET'), ('/api/nodes', 'GET'), ('/api/config', 'GET'), ('/api/auto', 'POST')):
                 code, headers, body = self.request(path, method)
                 self.assertEqual(code, 401)
                 self.assertNotIn('<html', body)
@@ -233,24 +317,31 @@ class HTTPTests(BackendFixture):
             run.assert_not_called()
             config.assert_not_called()
 
-    def test_entry_requires_single_correct_token_and_does_not_embed_secret(self):
-        for query in ('', '?token=wrong', '?token=' + TOKEN + '&token=' + TOKEN, '?token=%E4%B8%AD'):
+    def test_legacy_entry_confirms_single_token_without_creating_session(self):
+        for query in ('?token=', '?token=wrong', '?token=' + TOKEN + '&token=' + TOKEN,
+                      '?token=%E4%B8%AD', '?token=' + TOKEN + '&extra=1', '?'):
             self.assertEqual(self.request('/' + query)[0], 401)
         code, headers, body = self.request('/?token=' + TOKEN)
         self.assertEqual(code, 200)
         self.assertIn('history.replaceState', body)
+        self.assertIn('login-form', body)
+        self.assertNotIn('config-panel', body)
+        self.assertNotIn('Set-Cookie', headers)
+        self.assertEqual(self.server.sessions.records, {})
         self.assertNotIn(TOKEN, body)
         self.assertNotIn('__NONCE__', body)
         self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
         self.assertIn("frame-ancestors 'none'", headers['Content-Security-Policy'])
         self.assertNotIn("'unsafe-inline'", headers['Content-Security-Policy'])
 
-    def test_api_accepts_bearer_and_rejects_query_tokens(self):
+    def test_api_accepts_session_and_rejects_bearer_and_query_tokens(self):
         self.assertEqual(self.request('/api/nodes?token=' + TOKEN)[0], 401)
         code, _, body = self.request('/api/nodes', auth=True)
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)['data']['nodes'][0]['id'], 'a')
         self.assertEqual(self.request('/api/nodes', headers={'Authorization': 'Bearer wrong'})[0], 401)
+        self.assertEqual(self.request('/api/nodes', headers={'Authorization': 'Bearer ' + TOKEN})[0], 401)
+        self.assertEqual(self.request('/api/nodes?', auth=True)[0], 401)
 
     def test_rebinding_cross_origin_and_fetch_metadata_are_rejected(self):
         with patch.object(self.backend, 'run') as run:
@@ -261,7 +352,10 @@ class HTTPTests(BackendFixture):
 
     def test_forwarded_local_port_origin_works(self):
         headers = {'Host': '127.0.0.1:9876', 'Origin': 'http://127.0.0.1:9876', 'Sec-Fetch-Site': 'same-origin'}
-        self.assertEqual(self.request('/api/nodes', headers=headers, auth=True)[0], 200)
+        auth, _ = self.login(headers=headers)
+        self.assertEqual(self.request('/api/nodes', headers=dict(headers, **auth))[0], 200)
+        self.assertEqual(self.request('/api/nodes', headers=auth)[0], 401)
+        self.assertEqual(self.request('/api/nodes', headers=dict(headers, **auth))[0], 200)
 
     def test_write_request_type_size_and_shape_are_checked(self):
         self.assertEqual(self.request('/api/probe', 'POST', '{}', auth=True)[0], 415)
@@ -313,6 +407,143 @@ class HTTPTests(BackendFixture):
             self.assertEqual(self.request('/api/config/parse', 'POST', body, auth=True)[0], 400)
         self.assertEqual(self.request('/api/config/render', 'POST', {'text': CONFIG, 'model': {}}, auth=True)[0], 400)
         self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
+
+    def test_login_cookie_refresh_and_session_response_hide_credentials(self):
+        for remember in (False, True):
+            with self.subTest(remember=remember):
+                code, headers, body = self.request('/api/session/login', 'POST', {'remember': remember},
+                                                  {'Authorization': 'Bearer ' + TOKEN})
+                self.assertEqual(code, 200)
+                cookie = headers['Set-Cookie']
+                self.assertIn('; Path=/; HttpOnly; SameSite=Strict', cookie)
+                self.assertNotIn('Domain=', cookie)
+                self.assertNotIn('Secure', cookie)
+                self.assertEqual('Max-Age=' in cookie, remember)
+                if remember:
+                    self.assertIn('Max-Age=' + str(REMEMBER_SECONDS), cookie)
+                self.assertNotIn('Expires=', cookie)
+                auth = {'Cookie': cookie.split(';')[0]}
+                identifier = auth['Cookie'].split('=')[1]
+                self.assertNotIn(TOKEN, cookie + body)
+                self.assertNotIn(identifier, body)
+                code, _, page = self.request('/', headers=auth)
+                self.assertEqual(code, 200)
+                self.assertIn('config-panel', page)
+                code, _, status = self.request('/api/session', headers=auth)
+                self.assertEqual(code, 200)
+                data = json.loads(status)['data']
+                self.assertEqual(data['remember'], remember)
+                self.assertEqual(data['expires_at'] - data['created_at'], REMEMBER_SECONDS if remember else SESSION_SECONDS)
+                self.assertNotIn(TOKEN, page + status)
+                self.assertNotIn(identifier, page + status)
+                self.assertNotIn('Authorization', page.split('async function request')[1].split('function controls')[0])
+                self.assertEqual(self.request('/api/nodes', headers=auth)[0], 200)
+                self.assertEqual(self.request('/', headers=auth)[0], 200)
+
+    def test_unknown_expired_and_restarted_sessions_do_no_backend_work(self):
+        auth, _ = self.login(remember=True)
+        with patch.object(self.backend, 'run') as run, patch.object(self.backend, 'config') as config:
+            fake = {'Cookie': self.server.cookie_name + '=' + 'x' * 43}
+            self.assertEqual(self.request('/api/nodes', headers=fake)[0], 401)
+            deadline = max(session.deadline for session in self.server.sessions.records.values())
+            with patch('relay_helper.web.time.monotonic', return_value=deadline):
+                self.assertEqual(self.request('/api/nodes', headers=auth)[0], 401)
+                self.assertIn('login-form', self.request('/', headers=auth)[2])
+            for remember in (False, True):
+                auth, _ = self.login(remember)
+                port = self.server.server_address[1]
+                cookie_name = self.server.cookie_name
+                self.stop_server()
+                self.server = LocalServer(port, TOKEN, self.backend)
+                self.thread = threading.Thread(target=lambda: self.server.serve_forever(poll_interval=0.01), daemon=True)
+                self.thread.start()
+                self.assertEqual(self.server.cookie_name, cookie_name)
+                self.assertEqual(self.request('/api/session', headers=auth)[0], 401)
+                self.assertEqual(self.request('/api/config', headers=auth)[0], 401)
+                self.assertIn('login-form', self.request('/', headers=auth)[2])
+            run.assert_not_called()
+            config.assert_not_called()
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
+        self.assertFalse(self.state_path.exists())
+        new, _ = self.login()
+        self.assertNotEqual(new['Cookie'], auth['Cookie'])
+        self.assertEqual(self.request('/api/nodes', headers=new)[0], 200)
+        self.assertEqual(self.request('/api/nodes', headers=auth)[0], 401)
+
+    def test_logout_revokes_replay_preserves_other_browser_and_clears_cookie(self):
+        auth, _ = self.login()
+        other, _ = self.login()
+        self.assertNotEqual(auth['Cookie'], other['Cookie'])
+        self.assertEqual(self.request('/api/session/logout', 'GET', headers=auth)[0], 404)
+        code, headers, _ = self.request('/api/session/logout', 'POST', {}, auth)
+        self.assertEqual(code, 200)
+        self.assertEqual(headers['Set-Cookie'], self.server.cookie_name + '=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0')
+        self.assertEqual(self.request('/api/session', headers=auth)[0], 401)
+        self.assertIn('login-form', self.request('/', headers=auth)[2])
+        self.assertEqual(self.request('/api/nodes', headers=other)[0], 200)
+
+    def test_login_needs_bearer_and_boolean_json_and_has_no_business_effect(self):
+        with patch.object(self.backend, 'run') as run, patch.object(self.backend, 'config') as config:
+            for authorization in ('Bearer wrong', 'Basic ' + TOKEN, 'Bearer \xe9', ''):
+                self.assertEqual(self.request('/api/session/login', 'POST', {'remember': False},
+                                             {'Authorization': authorization})[0], 401)
+            for body in ({}, {'remember': 1}, {'remember': 'false'}, {'remember': None}, {'remember': False, 'token': TOKEN}):
+                self.assertEqual(self.request('/api/session/login', 'POST', body, {'Authorization': 'Bearer ' + TOKEN})[0], 400)
+            self.assertEqual(self.server.sessions.records, {})
+            run.assert_not_called()
+            config.assert_not_called()
+
+    def test_missing_origin_and_wrong_csrf_reject_login_and_all_writes(self):
+        auth, _ = self.login()
+        paths = ('/api/session/logout', '/api/probe', '/api/switch', '/api/auto', '/api/config',
+                 '/api/config/parse', '/api/config/render')
+        with patch.object(self.backend, 'run') as run, patch.object(self.backend, 'config') as config:
+            self.assertEqual(self.request('/api/session/login', 'POST', {'remember': False},
+                                         {'Authorization': 'Bearer ' + TOKEN}, auto_origin=False)[0], 403)
+            for path in paths:
+                self.assertEqual(self.request(path, 'POST', {}, auth, auto_origin=False)[0], 403)
+                for csrf in (None, 'wrong', '\xe9'):
+                    headers = {'Cookie': auth['Cookie']}
+                    if csrf is not None:
+                        headers['X-CSRF-Token'] = csrf
+                    self.assertEqual(self.request(path, 'POST', {}, headers)[0], 403)
+            run.assert_not_called()
+            config.assert_not_called()
+        self.assertEqual(self.request('/api/nodes', headers=auth)[0], 200)
+
+    def test_duplicate_cookie_headers_and_auth_headers_are_rejected(self):
+        auth, _ = self.login()
+        self.assertEqual(self.request('/api/nodes', headers={'Cookie': auth['Cookie'] + '; ' + auth['Cookie']})[0], 401)
+        self.assertEqual(self.request('/api/nodes', headers={'Cookie': auth['Cookie'] + '; ' + self.server.cookie_name + '=wrong'})[0], 401)
+        for name in ('Host', 'Origin', 'X-CSRF-Token', 'Cookie', 'Authorization', 'Content-Length'):
+            with self.subTest(header=name):
+                path = '/api/session/login' if name == 'Authorization' else '/api/session/logout'
+                content = json.dumps({'remember': False} if path.endswith('login') else {}).encode('ascii')
+                headers = dict(auth, Host=self.origin[7:], Origin=self.origin,
+                               Authorization='Bearer ' + TOKEN, **{'Content-Type': 'application/json', 'Content-Length': str(len(content))})
+                connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+                self.addCleanup(connection.close)
+                connection.putrequest('POST', path, skip_host=True)
+                for key, value in headers.items():
+                    connection.putheader(key, value)
+                connection.putheader(name, headers[name])
+                connection.endheaders(content)
+                response = connection.getresponse()
+                self.assertIn(response.status, (400, 401, 403))
+                response.read()
+        self.assertEqual(self.request('/api/nodes', headers=auth)[0], 200)
+
+    def test_host_ports_cross_origin_and_metadata_guard_login_too(self):
+        for headers in ({'Host': 'localhost:0'}, {'Host': 'localhost:65536'}, {'Host': 'localhost:123456'},
+                        {'Host': 'evil.test:8765'}, {'Origin': 'null'}, {'Origin': 'https://localhost:8765'},
+                        {'Origin': 'http://127.0.0.1:9876'}, {'Sec-Fetch-Site': 'cross-site'}, {'Sec-Fetch-Site': 'same-site'}):
+            self.assertEqual(self.request('/api/session/login', 'POST', {'remember': False},
+                                         dict(headers, Authorization='Bearer ' + TOKEN))[0], 403)
+        self.assertEqual(self.server.sessions.records, {})
+
+    def test_session_cookie_is_distinct_for_different_instances(self):
+        with LocalServer(0, TOKEN, self.backend) as other:
+            self.assertNotEqual(other.cookie_name, self.server.cookie_name)
 
 
 if __name__ == '__main__':

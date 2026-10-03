@@ -76,7 +76,7 @@
   <div class="wrap">
     <header>
       <div class="brand">Relay Helper<span>RustDesk OSS</span></div>
-      <span class="tag">127.0.0.1 · Token 访问</span>
+      <div class="actions"><span class="tag">127.0.0.1 · 会话访问</span><button id="logout">退出登录</button></div>
     </header>
     <main>
       <div class="intro">
@@ -85,6 +85,15 @@
         <p class="muted">管理 hbbs 下发的单个 relay，查看健康状态，按需切换。</p>
       </div>
       <div id="notice" role="status" aria-live="polite" hidden></div>
+      <section id="login-panel" class="panel" aria-labelledby="login-title" hidden>
+        <h2 id="login-title">登录已失效，请重新登录</h2>
+        <p class="hint">未保存的配置草稿仍保留在下方；登录后请再次确认并操作。</p>
+        <form id="login-form">
+          <label class="form-field">访问 token<input id="login-token" type="password" autocomplete="off" spellcheck="false" required></label>
+          <label><input id="login-remember" type="checkbox"> 记住登录（最多 7 天；服务重启后需重新登录）</label>
+          <p><button id="login-submit" type="submit" class="primary" data-auth>重新登录</button></p>
+        </form>
+      </section>
       <div class="cards">
         <section class="card"><div class="label">管理模式</div><div class="value" id="mode">读取中…</div><div class="detail" id="manual">—</div></section>
         <section class="card"><div class="label">实际 Relay · hbbs 回读</div><div class="value" id="actual">未确认</div><div class="detail" id="checked">—</div></section>
@@ -137,10 +146,8 @@
   <script nonce="__NONCE__">
     (() => {
       'use strict';
-      const token = new URLSearchParams(location.search).get('token');
-      history.replaceState(null, '', location.pathname);
       const $ = id => document.getElementById(id);
-      let busy = false, original = null, editMode = 'form', formDirty = false;
+      let busy = false, original = null, editMode = 'form', formDirty = false, csrf = null;
       function notice(message, error = false) {
         $('notice').textContent = message; $('notice').className = error ? 'error' : ''; $('notice').hidden = !message;
       }
@@ -183,22 +190,30 @@
         }
       }
       async function request(path, body) {
-        const headers = {Authorization: 'Bearer ' + token};
-        const options = {headers, cache: 'no-store', credentials: 'omit', redirect: 'error'};
-        if (body !== undefined) { options.method = 'POST'; headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
+        if (body !== undefined && !csrf) throw new Error('登录已失效，请重新登录。');
+        const headers = {};
+        const options = {headers, cache: 'no-store', credentials: 'same-origin', redirect: 'error'};
+        if (body !== undefined) {
+          options.method = 'POST'; headers['Content-Type'] = 'application/json'; headers['X-CSRF-Token'] = csrf;
+          options.body = JSON.stringify(body);
+        }
         const response = await fetch(path, options), result = await response.json();
+        if (response.status === 401) {
+          csrf = null; $('login-panel').hidden = false;
+          throw new Error('登录已失效，请重新登录。未保存的配置草稿已保留。');
+        }
         if (result.data && result.data.state) render(result.data);
-        if (!response.ok || !result.ok) throw new Error(response.status === 401 ? '访问已失效，请重新打开带 token 的地址。' : result.error || '请求失败');
+        if (!response.ok || !result.ok) throw new Error(result.error || '请求失败');
         return result.data;
       }
       function controls(disabled) {
-        document.querySelectorAll('button').forEach(button => {
+        document.querySelectorAll('button:not([data-auth])').forEach(button => {
           if (disabled) { button.dataset.wasDisabled = String(button.disabled); button.disabled = true; }
-          else { button.disabled = button.dataset.wasDisabled === 'true'; delete button.dataset.wasDisabled; }
+          else { button.disabled = !csrf || button.dataset.wasDisabled === 'true'; delete button.dataset.wasDisabled; }
         });
         $('form-fields').disabled = disabled || original === null;
         $('config-text').disabled = disabled || original === null;
-        if (!disabled) updateNodeActions();
+        if (!disabled && csrf) updateNodeActions();
       }
       async function perform(operation, success) {
         if (busy) return;
@@ -208,6 +223,28 @@
         finally { busy = false; controls(false); }
       }
       $('refresh').addEventListener('click', () => perform(() => request('/api/status')));
+      $('login-form').addEventListener('submit', async event => {
+        event.preventDefault();
+        if ($('login-submit').disabled || busy) return;
+        $('login-submit').disabled = true;
+        try {
+          const response = await fetch('/api/session/login', {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+            headers: {Authorization: 'Bearer ' + $('login-token').value, 'Content-Type': 'application/json'},
+            body: JSON.stringify({remember: $('login-remember').checked})
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) throw new Error(result.error || '登录失败');
+          $('login-token').value = ''; csrf = result.data.csrf; $('login-panel').hidden = true;
+          controls(false); notice('已重新登录，配置草稿保持原样。请再次确认并操作。');
+        } catch (error) { notice(error.message, true); }
+        finally { $('login-submit').disabled = false; }
+      });
+      $('logout').addEventListener('click', () => {
+        if (original && (formDirty || $('config-text').value !== original.text)
+            && !confirm('退出登录将放弃未保存的配置草稿，确认退出？')) return;
+        perform(async () => { await request('/api/session/logout', {}); location.replace('/'); });
+      });
       $('probe').addEventListener('click', () => perform(() => request('/api/probe', {}), '探测已完成；实际 relay 的读取时间请以卡片为准。'));
       $('auto').addEventListener('click', () => {
         if (confirm('恢复自动模式并立即按策略决策？')) perform(() => request('/api/auto', {}), '已恢复自动模式。');
@@ -355,7 +392,7 @@
           await request('/api/nodes');
         }, '配置已校验并保存，上一版保存在配置文件旁的 .webui.bak 文件。');
       });
-      perform(() => request('/api/status'));
+      perform(async () => { csrf = (await request('/api/session')).csrf; await request('/api/status'); });
     })();
   </script>
 </body>
