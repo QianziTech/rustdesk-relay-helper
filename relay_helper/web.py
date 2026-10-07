@@ -19,7 +19,7 @@ from urllib.parse import parse_qs
 
 from .config import config_model, load_config, update_config_text
 from .io import Console, ConsoleError, command_lock, config_document, load_state, replace_config, save_state
-from .policy import effective_rtt
+from .policy import effective_rtt, expire_health
 from .service import LOG, operate
 
 MAX_BODY = 65536
@@ -146,10 +146,12 @@ def load_token(path):
 
 def snapshot(config, state):
     nodes = []
+    now = time.time()
     for node in config.nodes:
         health = state['nodes'][node.id]
+        expire_health(health, config.policy, now)
         nodes.append(dict(asdict(node), **{'health': health,
-                     'effective_rtt_ms': effective_rtt(health, config.policy) if node.rtt_ranked else None}))
+                     'effective_rtt_ms': effective_rtt(health, config.policy, now) if node.rtt_ranked else None}))
     return {'state': {key: value for key, value in state.items() if key != 'nodes'},
             'nodes': nodes, 'policy': asdict(config.policy)}
 

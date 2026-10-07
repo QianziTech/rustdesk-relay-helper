@@ -9,10 +9,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 from .config import load_config
 from .io import Console, command_lock, load_state, save_state
-from .policy import effective_rtt
+from .policy import effective_rtt, expire_health
 from .service import LOG, operate
 
 
@@ -30,10 +31,12 @@ def timestamp(value):
 
 def show_nodes(config, state):
     print('ID\t启用\ttier\tRTT排名\t健康\t成功/失败\t最近RTT(ms)\t有效RTT(ms)\t探测源\t探测时间\t地址')
+    now = time.time()
     for node in config.nodes:
         health = state['nodes'][node.id]
+        expire_health(health, config.policy, now)
         raw = health.get('rtt_ms')
-        ranked = effective_rtt(health, config.policy) if node.rtt_ranked else None
+        ranked = effective_rtt(health, config.policy, now) if node.rtt_ranked else None
         print('\t'.join(map(str, [node.id, node.enabled, node.tier, node.rtt_ranked,
                                    health['health'], f"{health['successes']}/{health['failures']}",
                                    '-' if raw is None else round(raw, 2),

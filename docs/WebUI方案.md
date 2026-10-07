@@ -49,7 +49,7 @@ WebUI 是可选独立常驻进程。仅启动 WebUI 不会周期性探测或切�
 | `GET /api/status` | 回读实际 relay，展示模式、目标、原因、节点健康与 RTT，不探测、不写 relay。 |
 | `GET /api/nodes` | 配置与已有探测状态，不联系 hbbs。 |
 | `POST /api/probe`，`{}` | 探测并持久化计数，不读写 hbbs。 |
-| `POST /api/switch`，`{"id":"usla"}` | 与 CLI 相同：先探测，再检查健康、保存手动意图、应用并独立回读。 |
+| `POST /api/switch`，`{"id":"usla"}` | 与 CLI 相同：只对目标进行双次探测，要求本轮成功且健康，再保存手动意图、应用并独立回读。 |
 | `POST /api/auto`，`{}` | 与 CLI 相同：探测、恢复自动模式、立即决策。 |
 | `GET /api/config` | 返回当前 INI 文本及 SHA-256 内容版本。 |
 | `POST /api/config/parse`，`{"text":"..."}` | 使用现有解析器，将 INI 草稿映射为带默认值的策略与节点表单数据；不读取或修改磁盘。 |

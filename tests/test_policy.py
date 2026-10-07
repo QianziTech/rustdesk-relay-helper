@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 
 from relay_helper.config import Config, Node, Policy
-from relay_helper.policy import choose, effective_rtt, new_health, record_probe
+from relay_helper.policy import choose, effective_rtt, expire_health, new_health, record_probe
 
 
 class PolicyTests(unittest.TestCase):
@@ -28,11 +28,9 @@ class PolicyTests(unittest.TestCase):
     def test_unknown_start_preserves_actual(self):
         self.assertIsNone(self.selected())
 
-    def test_six_successes_required(self):
-        for _ in range(5):
-            record_probe(self.state['nodes']['a'], 10, None, 1, self.config.policy)
-        self.assertIsNone(self.selected(None))
-        record_probe(self.state['nodes']['a'], 10, None, 1, self.config.policy)
+    def test_new_node_first_success_is_healthy_and_ranked(self):
+        record_probe(self.state['nodes']['a'], 10, None, 1000, self.config.policy)
+        self.assertEqual(self.state['nodes']['a']['successes'], 1)
         self.assertEqual(self.selected(None), 'a')
 
     def test_failure_threshold_and_hold_bypass(self):
@@ -65,15 +63,70 @@ class PolicyTests(unittest.TestCase):
         self.healthy('a', 50)
         self.healthy('b', 60)
         record_probe(self.state['nodes']['b'], 1, None, 1000, self.config.policy)
-        self.assertEqual(effective_rtt(self.state['nodes']['b'], self.config.policy), 60)
+        self.assertEqual(effective_rtt(self.state['nodes']['b'], self.config.policy, 1000), 60)
         self.assertEqual(self.selected(), 'a')
 
-    def test_insufficient_samples_not_ranked(self):
-        self.config = replace(self.config, policy=replace(self.config.policy, rtt_sample_count=8))
-        self.healthy('a')
+    def test_partial_window_uses_all_available_samples(self):
+        record_probe(self.state['nodes']['a'], 10, None, 1000, self.config.policy)
+        record_probe(self.state['nodes']['a'], 30, None, 1000, self.config.policy)
         self.healthy('fallback', 200)
-        self.assertIsNone(effective_rtt(self.state['nodes']['a'], self.config.policy))
-        self.assertEqual(self.selected(None), 'fallback')
+        self.assertEqual(effective_rtt(self.state['nodes']['a'], self.config.policy, 1000), 20)
+        self.assertEqual(self.selected(None), 'a')
+
+    def test_full_window_evicts_oldest_point(self):
+        health = self.state['nodes']['a']
+        for index, value in enumerate((1000, 10, 20, 30, 40, 50)):
+            record_probe(health, value, None, 1000 + index, self.config.policy)
+        self.assertEqual([point['rtt_ms'] for point in health['samples']], [10, 20, 30, 40, 50])
+        self.assertEqual(effective_rtt(health, self.config.policy, 1005), 30)
+
+    def test_expiry_at_two_minutes_applies_to_ranked_and_fallback_nodes(self):
+        self.healthy('a')
+        self.healthy('fallback')
+        self.assertEqual(self.selected(None, 1119.999), 'a')
+        self.assertIsNone(self.selected(None, 1120))
+        for node in ('a', 'fallback'):
+            self.assertEqual(self.state['nodes'][node]['health'], 'unknown')
+            self.assertEqual(self.state['nodes'][node]['samples'], [])
+            self.assertIsNone(self.state['nodes'][node]['rtt_ms'])
+
+    def test_expired_point_is_not_renewed_by_new_success(self):
+        health = self.state['nodes']['a']
+        record_probe(health, 1, None, 900, self.config.policy)
+        record_probe(health, 100, None, 1000, self.config.policy)
+        self.assertEqual(effective_rtt(health, self.config.policy, 1020), 100)
+        record_probe(health, 200, None, 1020, self.config.policy)
+        self.assertEqual([point['at'] for point in health['samples']], [1000, 1020])
+
+    def test_gap_breaks_recovery_without_bypassing_unhealthy_state(self):
+        health = self.state['nodes']['a']
+        for _ in range(3):
+            record_probe(health, None, 'down', 1000, self.config.policy)
+        for _ in range(5):
+            record_probe(health, 10, None, 1000, self.config.policy)
+        record_probe(health, 10, None, 1120, self.config.policy)
+        self.assertEqual(health['successes'], 1)
+        self.assertEqual(health['health'], 'unhealthy')
+        self.assertIsNone(self.selected(None, 1120))
+        for _ in range(5):
+            record_probe(health, 10, None, 1120, self.config.policy)
+        self.assertEqual(self.selected(None, 1120), 'a')
+
+    def test_future_points_and_failure_streak_are_discarded_on_clock_rollback(self):
+        health = self.state['nodes']['a']
+        record_probe(health, 10, None, 1000, self.config.policy)
+        record_probe(health, None, 'down', 1000, self.config.policy)
+        expire_health(health, self.config.policy, 999)
+        self.assertEqual(health['health'], 'unknown')
+        self.assertEqual(health['samples'], [])
+        self.assertEqual(health['failures'], 0)
+
+    def test_expired_manual_target_is_not_applied_or_failed_over(self):
+        self.healthy('a')
+        record_probe(self.state['nodes']['b'], 1, None, 1120, self.config.policy)
+        self.state.update(mode='manual', manual_target='a')
+        self.assertIsNone(self.selected('a', 1120))
+        self.assertEqual(self.state['manual_target'], 'a')
 
     def test_fallback_is_automatic_and_does_not_compete_on_rtt(self):
         self.healthy('fallback', 1)
@@ -100,9 +153,9 @@ class PolicyTests(unittest.TestCase):
             record_probe(self.state['nodes']['a'], 1, None, 1000, self.config.policy)
         self.assertEqual(self.selected('lower'), 'lower')
         record_probe(self.state['nodes']['a'], 1, None, 1000, self.config.policy)
-        self.state['last_switch'] = 900
+        self.state['last_switch'] = 800
         self.assertEqual(self.selected('lower'), 'lower')
-        self.assertEqual(self.selected('lower', 1200), 'a')
+        self.assertEqual(self.selected('lower', 1100), 'a')
 
     def test_all_failed_never_clears_actual(self):
         for health in self.state['nodes'].values():
@@ -118,6 +171,15 @@ class PolicyTests(unittest.TestCase):
         for _ in range(3):
             record_probe(self.state['nodes']['a'], None, 'down', 1000, self.config.policy)
         self.assertIsNone(self.selected())
+
+    def test_manual_first_failure_does_not_reapply_historical_healthy_target(self):
+        self.healthy('a')
+        self.healthy('b', 1)
+        self.state.update(mode='manual', manual_target='a')
+        record_probe(self.state['nodes']['a'], None, 'down', 1000, self.config.policy)
+        self.assertEqual(self.state['nodes']['a']['health'], 'healthy')
+        self.assertIsNone(self.selected(None))
+        self.assertEqual(self.state['manual_target'], 'a')
 
     def test_hbbs_restart_reapplies_confirmed_target_during_hold(self):
         self.healthy('a', 100)

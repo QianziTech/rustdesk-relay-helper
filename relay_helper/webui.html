@@ -108,7 +108,7 @@
           <thead><tr><th>节点 / 地址</th><th>层级</th><th>健康</th><th>成功 / 失败</th><th>最近 / 有效 RTT</th><th>最近探测</th><th>操作</th></tr></thead>
           <tbody id="nodes"><tr><td colspan="7">正在载入节点…</td></tr></tbody>
         </table></div>
-        <p class="hint">探测仅检查管理器 → relay 的 TCP 连通性。手动固定后，自动任务不会切走该节点。</p>
+        <p class="hint">每轮连接两次，均成功时显示第二次 RTT。有效 RTT 使用最多五个、两分钟内的成功点中位数；不足五点也可排名。手动固定后，自动任务不会切走该节点。</p>
       </section>
       <section class="panel">
         <details id="config-panel">
@@ -162,7 +162,7 @@
         $('checked').textContent = state.actual_error || '读取时间：' + date(state.actual_checked_at);
         $('target').textContent = state.target || '—';
         $('reason').textContent = state.reason || '尚未执行策略';
-        $('policy').textContent = `连续 ${data.policy.recover_after} 次成功确认健康 · ${data.policy.fail_after} 次失败判定故障 · 保持期 ${data.policy.minimum_hold_seconds} 秒`;
+        $('policy').textContent = `新节点一轮成功确认健康 · 故障后连续 ${data.policy.recover_after} 轮成功恢复 · ${data.policy.fail_after} 轮失败判定故障 · 保持期 ${data.policy.minimum_hold_seconds} 秒`;
         $('nodes').replaceChildren();
         for (const node of data.nodes) {
           const health = node.health, row = document.createElement('tr');
@@ -174,11 +174,12 @@
           status.className = node.enabled ? health.health : '';
           status.title = health.error || '';
           cell(`${health.successes} / ${health.failures}`);
-          cell(rtt(health.rtt_ms) + ' / ' + rtt(node.effective_rtt_ms));
+          const latency = cell(rtt(health.rtt_ms) + ' / ' + rtt(node.effective_rtt_ms));
+          latency.title = `${health.samples.length}/${data.policy.rtt_sample_count} 个有效点（两分钟内）\n` + (health.last_attempts || []).map((attempt, index) => `第 ${index + 1} 次：${attempt.error || rtt(attempt.rtt_ms)}`).join('\n');
           cell(date(health.last_probe));
           const action = cell(''), button = document.createElement('button');
           button.textContent = state.mode === 'manual' && state.manual_target === node.id ? '已固定' : '固定此节点';
-          const unavailable = !node.enabled || health.health !== 'healthy';
+          const unavailable = !node.enabled || health.health !== 'healthy' || health.rtt_ms == null;
           button.disabled = busy || unavailable;
           if (busy) button.dataset.wasDisabled = String(unavailable);
           button.addEventListener('click', () => {
@@ -268,9 +269,9 @@
         ['probe_interval_seconds', '探测间隔（秒）', 1, 1, '实际周期由 systemd timer 控制，修改后需同步。'],
         ['connect_timeout_seconds', '连接超时（秒）', 0.000000001, 'any', 'TCP 探测和 hbbs 控制请求的超时。'],
         ['fail_after', '故障阈值（连续失败次数）', 1, 1, '达到阈值后判定不可用。'],
-        ['recover_after', '恢复阈值（连续成功次数）', 1, 1, '初次启动也需要累计成功次数。'],
+        ['recover_after', '恢复阈值（连续成功轮数）', 1, 1, '故障节点须累计成功轮数；新节点一轮成功即可。'],
         ['minimum_hold_seconds', '最短保持时间（秒）', 0, 'any', '限制健康节点之间切换；故障逃离不等待。'],
-        ['rtt_sample_count', 'RTT 样本数', 1, 1, '使用最近成功样本的中位数。'],
+        ['rtt_sample_count', 'RTT 样本上限', 1, 1, '1–5 点；两分钟内的成功点取中位数，不要求满窗口。'],
         ['rtt_switch_margin_ms', 'RTT 改善阈值（毫秒）', 0, 'any', '同层主动切换至少需要的延迟改善。']
       ];
       function field(parent, name, label, type, value, hint = '', attributes = {}) {
@@ -325,7 +326,11 @@
       }
       function renderForm(model) {
         $('policy-fields').replaceChildren(); $('node-fields').replaceChildren();
-        for (const [name, label, min, step, hint] of policyFields) field($('policy-fields'), name, label, 'number', model.policy[name], hint, {min, step});
+        for (const [name, label, min, step, hint] of policyFields) {
+          const attributes = {min, step};
+          if (name === 'rtt_sample_count') attributes.max = 5;
+          field($('policy-fields'), name, label, 'number', model.policy[name], hint, attributes);
+        }
         for (const node of model.nodes) addNode(node);
         formDirty = false;
       }

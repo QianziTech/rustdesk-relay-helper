@@ -179,6 +179,45 @@ class SessionTests(unittest.TestCase):
 
 class BackendTests(BackendFixture):
 
+    def test_first_point_ranks_and_status_hides_expired_rtt_preserving_manual_mode(self):
+        self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
+        with patch('relay_helper.web.time.time', return_value=1000), \
+                patch('relay_helper.service.probe_tcp', side_effect=[(800, None), (12, None)]), \
+                patch('relay_helper.web.Console') as cls:
+            cls.return_value.read.return_value = []
+            cls.return_value.apply.return_value = True
+            code, result = self.backend.run('switch', 'a')
+        self.assertEqual(code, 200)
+        node = result['data']['nodes'][0]
+        self.assertEqual(node['effective_rtt_ms'], 12)
+        self.assertEqual(len(node['health']['samples']), 1)
+        self.assertEqual(node['health']['last_attempts'][0]['rtt_ms'], 800)
+        with patch('relay_helper.web.time.time', return_value=1120), patch('relay_helper.web.Console') as cls, \
+                patch('relay_helper.service.probe_tcp') as tcp:
+            cls.return_value.read.return_value = ['a.test:21117']
+            code, result = self.backend.run('status')
+            cls.return_value.apply.assert_not_called()
+            tcp.assert_not_called()
+        self.assertEqual(code, 200)
+        node = result['data']['nodes'][0]
+        self.assertIsNone(node['effective_rtt_ms'])
+        self.assertIsNone(node['health']['rtt_ms'])
+        self.assertEqual(node['health']['health'], 'unknown')
+        self.assertEqual(result['data']['state']['mode'], 'manual')
+        self.assertEqual(result['data']['state']['manual_target'], 'a')
+
+    def test_web_switch_probes_only_requested_node(self):
+        with self.config_path.open('a', encoding='utf-8') as stream:
+            stream.write('[node:b]\naddress=b.test:21117\ntier=20\n')
+        with patch('relay_helper.service.probe_tcp', return_value=(12, None)) as tcp, \
+                patch('relay_helper.web.Console') as cls:
+            cls.return_value.read.return_value = []
+            cls.return_value.apply.return_value = True
+            code, result = self.backend.run('switch', 'a')
+        self.assertEqual(code, 200)
+        self.assertEqual([call.args[0].id for call in tcp.call_args_list], ['a', 'a'])
+        self.assertEqual(result['data']['nodes'][1]['health']['samples'], [])
+
     def test_probe_switch_auto_share_persistent_mode_and_confirmation(self):
         with patch('relay_helper.service.probe_tcp', return_value=(12, None)), patch('relay_helper.web.Console') as cls:
             console = cls.return_value

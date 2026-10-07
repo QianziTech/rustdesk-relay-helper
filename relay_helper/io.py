@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import socket
 import tempfile
@@ -10,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import endpoint, parse_config
-from .policy import new_health
+from .policy import expire_health, new_health
 
 
 class ConsoleError(RuntimeError):
@@ -99,6 +100,7 @@ def load_state(path, config):
         if state['mode'] == 'manual' and not isinstance(state.get('manual_target'), str):
             raise ValueError('运行状态缺少手动目标')
     active = {}
+    now = time.time()
     for node in config.nodes:
         health = state['nodes'].get(node.id)
         if not node.enabled or not health or health.get('address') != node.address:
@@ -106,12 +108,38 @@ def load_state(path, config):
         if (health.get('health') not in ('unknown', 'healthy', 'unhealthy')
                 or any(not isinstance(health.get(k), int) or health[k] < 0 for k in ('successes', 'failures'))
                 or not isinstance(health.get('samples'), list)
-                or any(not isinstance(x, (int, float)) or x < 0 for x in health['samples'])):
+                or any(not _valid_sample(x) for x in health['samples'])):
             raise ValueError('节点运行状态无效: ' + node.id)
-        health['samples'] = health['samples'][-config.policy.rtt_sample_count:]
+        last = health.get('last_probe')
+        if last is not None and not _finite_nonnegative(last):
+            raise ValueError('节点探测时间无效: ' + node.id)
+        if health.get('rtt_ms') is not None and not _finite_nonnegative(health['rtt_ms']):
+            raise ValueError('节点探测 RTT 无效: ' + node.id)
+        if any(isinstance(x, (int, float)) for x in health['samples']):
+            # Legacy floats have no per-point timestamps; never renew their TTL.
+            health.update(samples=[], last_probe=None, successes=0, failures=0)
+        health.setdefault('last_attempts', [])
+        if (not isinstance(health['last_attempts'], list) or len(health['last_attempts']) > 2
+                or any(not isinstance(attempt, dict) or set(attempt) != {'rtt_ms', 'error'}
+                       or (attempt['rtt_ms'] is not None and not _finite_nonnegative(attempt['rtt_ms']))
+                       or (attempt['error'] is not None and not isinstance(attempt['error'], str))
+                       for attempt in health['last_attempts'])):
+            raise ValueError('节点探测详情无效: ' + node.id)
+        expire_health(health, config.policy, now)
         active[node.id] = health
     state['nodes'] = active
     return state
+
+
+def _finite_nonnegative(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _valid_sample(point):
+    if _finite_nonnegative(point):
+        return True  # Valid legacy point, discarded by the loader.
+    return (isinstance(point, dict) and set(point) == {'at', 'rtt_ms'}
+            and all(_finite_nonnegative(point[key]) for key in ('at', 'rtt_ms')))
 
 
 def save_state(path, state):

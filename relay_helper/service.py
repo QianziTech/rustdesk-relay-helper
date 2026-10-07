@@ -5,21 +5,33 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .io import ConsoleError, probe_tcp
-from .policy import choose, record_probe
+from .policy import choose, expire_health, record_probe
 
 LOG = logging.getLogger('rustdesk-relay-helper')
 
 
-def probe(config, state):
-    enabled = [node for node in config.nodes if node.enabled]
+def probe_node(node, timeout):
+    attempts = []
+    for _ in range(2):
+        rtt, error = probe_tcp(node, timeout)
+        attempts.append(dict(rtt_ms=rtt, error=error))
+    failures = ['第{}次: {}'.format(index + 1, attempt['error'] or '连接失败')
+                for index, attempt in enumerate(attempts) if attempt['rtt_ms'] is None]
+    return (None if failures else attempts[1]['rtt_ms'],
+            '; '.join(failures) if failures else None, attempts, time.time())
+
+
+def probe(config, state, node_id=None):
+    enabled = [node for node in config.nodes if node.enabled and (node_id is None or node.id == node_id)]
     with ThreadPoolExecutor(max_workers=max(1, min(16, len(enabled)))) as pool:
-        results = pool.map(lambda node: probe_tcp(node, config.policy.connect_timeout_seconds), enabled)
-        for node, (rtt, error) in zip(enabled, results):
+        results = pool.map(lambda node: probe_node(node, config.policy.connect_timeout_seconds), enabled)
+        for node, (rtt, error, attempts, checked_at) in zip(enabled, results):
             health = state['nodes'][node.id]
             previous = health['health']
-            record_probe(health, rtt, error, time.time(), config.policy)
-            LOG.info('probe node=%s source=CNHZ rtt_ms=%s health=%s error=%s',
-                     node.id, rtt, health['health'], error)
+            record_probe(health, rtt, error, checked_at, config.policy)
+            health['last_attempts'] = attempts
+            LOG.info('probe node=%s source=CNHZ rtt_ms=%s health=%s error=%s attempts=%s',
+                     node.id, rtt, health['health'], error, attempts)
             if health['health'] != previous:
                 LOG.info('health node=%s %s -> %s', node.id, previous, health['health'])
 
@@ -70,7 +82,9 @@ def set_manual(config, state, node_id):
     node = next((n for n in config.nodes if n.id == node_id and n.enabled), None)
     if node is None:
         raise ValueError('节点不存在或已禁用: ' + node_id)
-    if state['nodes'][node.id]['health'] != 'healthy':
+    expire_health(state['nodes'][node.id], config.policy, time.time())
+    if (state['nodes'][node.id]['health'] != 'healthy'
+            or state['nodes'][node.id].get('rtt_ms') is None):
         raise ValueError('节点最近状态不健康；请先执行 probe 积累恢复计数')
     state['mode'] = 'manual'
     state['manual_target'] = node.id
@@ -86,7 +100,10 @@ def operate(config, state, console, command, node_id=None):
         return
     if command not in ('probe', 'switch', 'auto', 'reconcile'):
         raise ValueError('未知操作: ' + command)
-    probe(config, state)
+    if command == 'switch':
+        if not any(node.id == node_id and node.enabled for node in config.nodes):
+            raise ValueError('节点不存在或已禁用: ' + str(node_id))
+    probe(config, state, node_id if command == 'switch' else None)
     if command == 'switch':
         set_manual(config, state, node_id)
     elif command == 'auto':
