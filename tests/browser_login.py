@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from relay_helper.web import Backend, LocalServer, REMEMBER_SECONDS
+from relay_helper.config import load_config
+from relay_helper.io import load_state
 
 try:
     from playwright.sync_api import expect, sync_playwright
@@ -32,11 +34,12 @@ class BrowserLoginTests(unittest.TestCase):
         self.backend = Backend(self.config_path, Path(self.tmp.name) / 'state.json')
         console = patch('relay_helper.web.Console')
         fake = console.start().return_value
+        self.console = fake
         self.addCleanup(console.stop)
         fake.read.return_value = ['a.test:21117']
         fake.apply.return_value = True
         probe = patch('relay_helper.service.probe_tcp', return_value=(12, None))
-        probe.start()
+        self.tcp = probe.start()
         self.addCleanup(probe.stop)
         self.start_server()
         self.addCleanup(self.stop_server)
@@ -133,21 +136,21 @@ class BrowserLoginTests(unittest.TestCase):
         page.goto(self.url)
         self.login()
         page.locator('#config-panel summary').click()
-        tier = page.locator('[data-field=tier]')
-        expect(tier).to_have_value('10')
-        tier.fill('21')
+        address = page.locator('[data-field=address]')
+        expect(address).to_have_value('a.test:21117')
+        address.fill('changed.test:21117')
         self.restart_server()
         page.locator('#preview-config').click()
         expect(page.locator('#login-panel')).to_be_visible()
-        expect(tier).to_have_value('21')
+        expect(address).to_have_value('changed.test:21117')
         self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
         count = len(requests)
         self.login()
         expect(page.locator('#login-panel')).to_be_hidden()
-        expect(tier).to_have_value('21')
+        expect(address).to_have_value('changed.test:21117')
         self.assertEqual([path for path, _, _ in requests[count:]], ['/api/session/login'])
         page.locator('#preview-config').click()
-        expect(page.locator('#diff')).to_contain_text('tier=21')
+        expect(page.locator('#diff')).to_contain_text('address=changed.test:21117')
         page.locator('#text-mode').click()
         draft = page.locator('#config-text').input_value() + '# retained draft\n'
         page.locator('#config-text').fill(draft)
@@ -171,6 +174,150 @@ class BrowserLoginTests(unittest.TestCase):
                 self.assertNotIn('authorization', headers)
                 if method == 'POST':
                     self.assertIn('x-csrf-token', headers)
+        self.assertEqual(self.errors, [])
+
+    def test_probe_counts_rounds_and_failed_healthy_node_can_retry_switch(self):
+        self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
+        page = self.page
+        page.goto(self.url)
+        self.login()
+        for count in (1, 2):
+            page.locator('#probe').click()
+            expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text(f'{count} / 0')
+            expect(page.locator('#notice')).to_contain_text('探测已完成')
+            state = load_state(self.backend.state_path, load_config(self.config_path))
+            self.assertEqual(len(state['nodes']['a']['samples']), count)
+            self.assertEqual(self.tcp.call_count, 2 * count)
+        self.tcp.side_effect = [(12, None), (None, 'temporary timeout')]
+        page.locator('#probe').click()
+        expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text('0 / 1')
+        expect(page.locator('#nodes tr button')).to_be_enabled()
+        self.tcp.side_effect = None
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#nodes tr button').click()
+        expect(page.locator('#notice')).to_contain_text('手动模式已应用')
+        expect(page.locator('#mode')).to_have_text('手动固定')
+        expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text('1 / 0')
+        self.assertEqual(self.tcp.call_count, 8)
+        self.assertEqual(self.errors, [])
+
+    def open_node_editor(self):
+        self.page.set_viewport_size({'width': 1280, 'height': 2400})
+        text = (CONFIG.split('[node:a]')[0] +
+                '# last in display\n[node:c]\naddress=c.test:21117\ntier=30\n' +
+                '# retained node comment\n[node:a]\naddress=a.test:21117\ntier=10\n' +
+                '[node:b]\naddress=b.test:21117\ntier=10\n')
+        self.config_path.write_text(text, encoding='utf-8')
+        self.page.goto(self.url)
+        self.login()
+        self.page.locator('#config-panel summary').click()
+        expect(self.page.locator('.node-form')).to_have_count(3)
+        return text
+
+    def drag_card(self, source, destination, fraction=.25, cancel=False, start_area='.drag-handle'):
+        handle = source.locator(start_area)
+        handle.scroll_into_view_if_needed()
+        start = handle.bounding_box()
+        destination.scroll_into_view_if_needed()
+        start = handle.bounding_box()
+        end = destination.bounding_box()
+        self.page.mouse.move(start['x'] + start['width'] / 2, start['y'] + start['height'] / 2)
+        self.page.mouse.down()
+        self.page.mouse.move(end['x'] + end['width'] / 2, end['y'] + end['height'] * fraction, steps=10)
+        if cancel:
+            self.page.keyboard.press('Escape')
+        self.page.mouse.up()
+
+    def test_drag_display_order_save_reload_preserves_config_order_and_rtt_choice(self):
+        original = self.open_node_editor()
+        page = self.page
+        cards = page.locator('.node-form')
+        expect(page.locator('.priority-group, #add-group')).to_have_count(0)
+        expect(cards.locator('.node-name')).to_have_text(['a', 'b', 'c'])
+        expect(page.locator('[data-field=tier], [data-action=up], [data-action=down]')).to_have_count(0)
+        page.locator('#preview-config').click()
+        expect(page.locator('#notice')).to_contain_text('修改预览已生成')
+        self.assertEqual(page.locator('#config-text').input_value(), original)
+        self.drag_card(cards.nth(0), cards.nth(2), start_area='.node-name')
+        expect(cards.locator('.node-name')).to_have_text(['b', 'a', 'c'])
+        self.drag_card(cards.nth(2), cards.nth(0))
+        expect(cards.locator('.node-name')).to_have_text(['c', 'b', 'a'])
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), original)
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#save-config').click()
+        expect(page.locator('#notice')).to_contain_text('配置已校验并保存')
+        config = load_config(self.config_path)
+        self.assertEqual([(node.id, node.tier) for node in config.nodes], [('c', 0), ('a', 2), ('b', 1)])
+        self.assertTrue(all(node.rtt_ranked for node in config.nodes))
+        self.assertIn('# retained node comment', self.config_path.read_text(encoding='utf-8'))
+        # Runtime order follows measured RTT, independently of the dragged display order.
+        with patch('relay_helper.service.probe_tcp', side_effect=lambda node, timeout: ({'a': 10, 'b': 50, 'c': 80}[node.id], None)):
+            page.locator('#probe').click()
+            expect(page.locator('#notice')).to_contain_text('探测已完成')
+            self.assertEqual(page.locator('#nodes tr td:first-child').evaluate_all(
+                'cells => cells.map(cell => cell.firstChild.textContent)'), ['a', 'b', 'c'])
+            page.once('dialog', lambda dialog: dialog.accept())
+            page.locator('#auto').click()
+            expect(page.locator('#notice')).to_contain_text('已恢复自动模式')
+            expect(page.locator('#target')).to_have_text('a.test:21117')
+        page.reload()
+        page.locator('#config-panel summary').click()
+        expect(page.locator('.node-form .node-name')).to_have_text(['c', 'b', 'a'])
+        self.assertEqual(self.errors, [])
+
+    def test_cancel_drag_keyboard_move_and_add_remove_node(self):
+        original = self.open_node_editor()
+        page = self.page
+        cards = page.locator('.node-form')
+        self.drag_card(cards.nth(0), cards.nth(2), cancel=True)
+        expect(cards.locator('.node-name')).to_have_text(['a', 'b', 'c'])
+        expect(page.locator('.dragging, .drop-before, .drop-after')).to_have_count(0)
+        handle = cards.nth(2).locator('.drag-handle')
+        handle.focus()
+        handle.press('ArrowUp')
+        expect(cards.locator('.node-name')).to_have_text(['a', 'c', 'b'])
+        page.locator('#add-node').click()
+        expect(cards).to_have_count(4)
+        cards.nth(3).locator('[data-field=id]').fill('new')
+        cards.nth(3).locator('[data-field=address]').fill('new.test:21117')
+        cards.nth(2).locator('[data-action=remove]').click()
+        expect(cards.locator('.node-name')).to_have_text(['a', 'c', 'new'])
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), original)
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#save-config').click()
+        expect(page.locator('#notice')).to_contain_text('配置已校验并保存')
+        self.assertEqual([(node.id, node.tier) for node in load_config(self.config_path).nodes], [('c', 1), ('a', 0), ('new', 3)])
+        self.assertEqual(self.errors, [])
+
+    def test_touch_drag_and_mouse_drag_scroll_at_viewport_edge(self):
+        self.open_node_editor()
+        page = self.page
+        cards = page.locator('.node-form')
+        start = cards.nth(0).locator('.drag-handle').bounding_box()
+        end = cards.nth(2).bounding_box()
+        x, y = start['x'] + start['width'] / 2, start['y'] + start['height'] / 2
+        target_x, target_y = end['x'] + end['width'] / 2, end['y'] + end['height'] / 4
+        client = self.context.new_cdp_session(page)
+        client.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]})
+        for step in range(1, 11):
+            client.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [
+                {'x': x + (target_x - x) * step / 10, 'y': y + (target_y - y) * step / 10}]})
+        client.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+        expect(cards.locator('.node-name')).to_have_text(['b', 'a', 'c'])
+        client.detach()
+        page.set_viewport_size({'width': 1280, 'height': 720})
+        handle = cards.nth(0).locator('.drag-handle')
+        handle.scroll_into_view_if_needed()
+        start = handle.bounding_box()
+        page.mouse.move(start['x'] + start['width'] / 2, start['y'] + start['height'] / 2)
+        page.mouse.down()
+        scroll = page.evaluate('window.scrollY')
+        page.mouse.move(800, 710, steps=5)
+        page.wait_for_function('initial => window.scrollY > initial + 40', arg=scroll)
+        page.keyboard.press('Escape')
+        page.mouse.up()
+        expect(page.locator('.dragging, .drop-before, .drop-after')).to_have_count(0)
+        expect(cards.locator('.node-name')).to_have_text(['b', 'a', 'c'])
         self.assertEqual(self.errors, [])
 
 

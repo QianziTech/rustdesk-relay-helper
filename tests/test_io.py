@@ -1,5 +1,6 @@
 import socket
 import socketserver
+import json
 import tempfile
 import threading
 import time
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from relay_helper.config import Config, Node, Policy, endpoint, load_config
 from relay_helper.io import Console, ConsoleError, command_lock, load_state, parse_relays, probe_tcp, save_state
+from relay_helper.policy import record_probe
 
 
 @contextmanager
@@ -133,7 +135,8 @@ class ConfigStateTests(unittest.TestCase):
 
     def test_invalid_config(self):
         file = self.path / 'config.ini'
-        for entry in ['fail_after = 0', 'recover_after = -1', 'connect_timeout_seconds = nan', 'rtt_sample_count = 1.5', 'typo = 2']:
+        for entry in ['fail_after = 0', 'recover_after = -1', 'connect_timeout_seconds = nan',
+                      'rtt_sample_count = 1.5', 'rtt_sample_count = 6', 'typo = 2']:
             file.write_text('[policy]\n' + entry + '\n[node:a]\naddress = a.test:21117\ntier = 10\n', encoding='utf-8')
             with self.subTest(entry=entry), self.assertRaises(ValueError):
                 load_config(file)
@@ -148,7 +151,7 @@ class ConfigStateTests(unittest.TestCase):
         path = self.path / 'state.json'
         state = load_state(path, self.config)
         state.update(mode='manual', manual_target='a')
-        state['nodes']['a']['health'] = 'healthy'
+        record_probe(state['nodes']['a'], 10, None, time.time(), self.config.policy)
         save_state(path, state)
         loaded = load_state(path, self.config)
         self.assertEqual(loaded['mode'], 'manual')
@@ -156,6 +159,68 @@ class ConfigStateTests(unittest.TestCase):
         altered = replace(self.config, nodes=(Node('a', 'new.test:21117', 10),))
         self.assertEqual(load_state(path, altered)['nodes']['a']['health'], 'unknown')
         self.assertEqual(list(self.path.glob('*.tmp')), [])
+
+    def test_invalid_auto_reselection_flag_rejected(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        state['auto_reselect'] = 'true'
+        save_state(path, state)
+        with self.assertRaises(ValueError):
+            load_state(path, self.config)
+
+    def test_legacy_samples_discarded_without_losing_manual_or_confirmed_target(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        state.update(mode='manual', manual_target='a', confirmed_target='a.test:21117')
+        state['nodes']['a'].update(health='healthy', successes=6, samples=[10, 20],
+                                 last_probe=time.time(), rtt_ms=20)
+        save_state(path, state)
+        loaded = load_state(path, self.config)
+        self.assertEqual(loaded['mode'], 'manual')
+        self.assertEqual(loaded['confirmed_target'], 'a.test:21117')
+        self.assertEqual(loaded['nodes']['a']['health'], 'unknown')
+        self.assertEqual(loaded['nodes']['a']['samples'], [])
+
+    def test_expired_samples_and_counts_not_refreshed_by_loading(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        record_probe(state['nodes']['a'], 10, None, 1000, self.config.policy)
+        save_state(path, state)
+        with patch('relay_helper.io.time.time', return_value=1120):
+            loaded = load_state(path, self.config)
+        self.assertEqual(loaded['nodes']['a']['samples'], [])
+        self.assertEqual(loaded['nodes']['a']['health'], 'unknown')
+        self.assertEqual(loaded['nodes']['a']['last_probe'], 1000)
+        self.assertEqual(loaded['nodes']['a']['successes'], 0)
+
+    def test_invalid_samples_timestamps_and_attempts_rejected(self):
+        path = self.path / 'state.json'
+        cases = [dict(samples=[{'at': 1000, 'rtt_ms': -1}]),
+                 dict(samples=[{'at': 'yesterday', 'rtt_ms': 10}]),
+                 dict(samples=[{'at': 1000}]), dict(samples=[True]),
+                 dict(last_probe='now'), dict(rtt_ms=-1), dict(last_attempts=[{}])]
+        for changes in cases:
+            state = load_state(self.path / 'missing.json', self.config)
+            state['nodes']['a'].update(changes)
+            save_state(path, state)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                load_state(path, self.config)
+        # Hand-written corrupt JSON can contain NaN even though our writer rejects it.
+        state = load_state(self.path / 'missing.json', self.config)
+        text = json.dumps(state).replace('"samples": []', '"samples": [NaN]')
+        path.write_text(text, encoding='utf-8')
+        with self.assertRaises(ValueError):
+            load_state(path, self.config)
+
+    def test_legacy_unhealthy_node_keeps_recovery_requirement(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        state['nodes']['a'].update(health='unhealthy', successes=5, samples=[10], last_probe=time.time())
+        save_state(path, state)
+        loaded = load_state(path, self.config)
+        record_probe(loaded['nodes']['a'], 10, None, time.time(), self.config.policy)
+        self.assertEqual(loaded['nodes']['a']['health'], 'unhealthy')
+        self.assertEqual(loaded['nodes']['a']['successes'], 1)
 
     def test_corrupt_state_does_not_reset_manual_mode(self):
         path = self.path / 'state.json'

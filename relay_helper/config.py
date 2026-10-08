@@ -81,6 +81,8 @@ def parse_config(text):
         minimum = 0 if name in ('minimum_hold_seconds', 'rtt_switch_margin_ms') else 1e-9
         if not math.isfinite(value) or value < minimum:
             raise ValueError('策略参数取值不合法: ' + name)
+        if name == 'rtt_sample_count' and value > 5:
+            raise ValueError('rtt_sample_count 必须为 1–5')
         values[name] = value
     nodes = []
     addresses = set()
