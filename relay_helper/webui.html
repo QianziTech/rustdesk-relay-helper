@@ -57,9 +57,15 @@
     .form-field > span { display: block; font-size: 13px; font-weight: 600; }
     .form-field input { display: block; width: 100%; min-width: 0; margin: 6px 0; padding: 9px 12px; color: var(--ink); background: #fafcfb; border: 1px solid var(--line); border-radius: 8px; }
     .form-field small { display: block; color: var(--muted); font-size: 12px; }
-    .node-form { border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; min-width: 0; }
+    .node-form { border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; min-width: 0; cursor: grab; background: white; }
+    .node-form label { cursor: auto; }
     .node-form legend { padding: 0 6px; font-weight: 600; font-size: 14px; }
-    .node-form .form-grid { grid-template-columns: 1fr 2fr .7fr; margin: 4px 0 12px; }
+    .node-form .form-grid { grid-template-columns: 1fr 2fr; margin: 4px 0 12px; }
+    .drag-handle { padding: 4px 8px; margin-right: 8px; font-size: 12px; cursor: grab; touch-action: none; }
+    .drag-handle:active { cursor: grabbing; }
+    .node-form.dragging { opacity: .55; }
+    .node-form.drop-before { border-top: 3px solid var(--green); }
+    .node-form.drop-after { border-bottom: 3px solid var(--green); }
     .node-options { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
     .checks { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; }
     .checks label { display: flex; align-items: center; gap: 6px; }
@@ -101,11 +107,11 @@
       </div>
       <section class="panel" aria-labelledby="nodes-title">
         <div class="section-head">
-          <div><h2 id="nodes-title">中继节点</h2><p class="hint" id="policy">层级优先，同层比较有效 RTT。</p></div>
+          <div><h2 id="nodes-title">中继节点</h2><p class="hint" id="policy">可用节点按有效 RTT 从低到高排名。</p></div>
           <div class="actions"><button id="refresh">刷新状态</button><button id="probe">立即探测</button><button id="auto" class="primary">恢复自动模式</button></div>
         </div>
         <div class="scroll"><table>
-          <thead><tr><th>节点 / 地址</th><th>层级</th><th>健康</th><th>连续成功 / 失败轮数</th><th>最近 / 有效 RTT</th><th>最近探测</th><th>操作</th></tr></thead>
+          <thead><tr><th>节点 / 地址</th><th>排名方式</th><th>健康</th><th>连续成功 / 失败轮数</th><th>最近 / 有效 RTT</th><th>最近探测</th><th>操作</th></tr></thead>
           <tbody id="nodes"><tr><td colspan="7">正在载入节点…</td></tr></tbody>
         </table></div>
         <p class="hint">每轮连接两次，均成功时显示第二次 RTT。有效 RTT 使用最多五个、两分钟内的成功点中位数；不足五点也可排名。手动固定后，自动任务不会切走该节点。</p>
@@ -114,7 +120,6 @@
         <details id="config-panel">
           <summary>节点与策略配置</summary>
           <div class="editor">
-            <p class="hint">表单与 INI 文本编辑同一份草稿，切换方式不会保存。校验并保存后，下一次命令或定时任务读取新配置。</p>
             <div class="actions editor-modes" role="group" aria-label="配置编辑方式">
               <button id="form-mode" aria-pressed="true" aria-controls="form-view">GUI 表单</button>
               <button id="text-mode" aria-pressed="false" aria-controls="text-view">INI 文本</button>
@@ -125,8 +130,9 @@
                   <h2>策略参数</h2>
                   <div id="policy-fields" class="form-grid"></div>
                   <div class="section-head"><h2>节点配置</h2><button id="add-node" type="button">添加节点</button></div>
-                  <p class="hint">层级数字越小越优先，编辑时按层级升序排列。同层节点可上移、下移；未参与 RTT 排名的同层节点按此顺序接管。</p>
+                  <p class="hint" id="node-order-help">拖动卡片调整展示顺序，也可聚焦拖动按钮使用方向键移动。自动选择按有效 RTT 排名，与展示顺序无关；调整后需校验并保存。</p>
                   <div id="node-fields"></div>
+                  <p class="hint" id="node-order-status" role="status" aria-live="polite"></p>
                 </fieldset>
               </form>
             </div>
@@ -141,7 +147,6 @@
         </details>
       </section>
     </main>
-    <footer>仅本机监听 · Bash 与 WebUI 共用策略和文件锁 · 运行日志通过终端 history 命令查看</footer>
   </div>
   <script nonce="__NONCE__">
     (() => {
@@ -164,12 +169,12 @@
         $('reason').textContent = state.reason || '尚未执行策略';
         $('policy').textContent = `新节点一轮成功确认健康 · 故障后连续 ${data.policy.recover_after} 轮成功恢复 · ${data.policy.fail_after} 轮失败判定故障 · 保持期 ${data.policy.minimum_hold_seconds} 秒`;
         $('nodes').replaceChildren();
-        for (const node of [...data.nodes].sort((a, b) => a.tier - b.tier)) {
+        for (const node of data.nodes) {
           const health = node.health, row = document.createElement('tr');
           const cell = text => { const el = document.createElement('td'); el.textContent = text; row.append(el); return el; };
           const identity = cell(node.id), address = document.createElement('small');
           address.textContent = node.address; identity.append(address);
-          cell(String(node.tier) + (node.rtt_ranked ? ' · RTT' : ' · 顺序'));
+          cell(node.rtt_ranked ? 'RTT' : '顺序');
           const status = cell(!node.enabled ? '已禁用' : ({healthy: '健康', unhealthy: '不可用', unknown: '未知'})[health.health]);
           status.className = node.enabled ? health.health : '';
           status.title = health.error || '';
@@ -208,6 +213,7 @@
         return result.data;
       }
       function controls(disabled) {
+        if (disabled) cancelDrag();
         document.querySelectorAll('button:not([data-auth])').forEach(button => {
           if (disabled) { button.dataset.wasDisabled = String(button.disabled); button.disabled = true; }
           else { button.disabled = !csrf || button.dataset.wasDisabled === 'true'; delete button.dataset.wasDisabled; }
@@ -272,7 +278,7 @@
         ['recover_after', '恢复阈值（连续成功轮数）', 1, 1, '故障节点须累计成功轮数；新节点一轮成功即可。'],
         ['minimum_hold_seconds', '最短保持时间（秒）', 0, 'any', '限制健康节点之间切换；故障逃离不等待。'],
         ['rtt_sample_count', 'RTT 样本上限', 1, 1, '1–5 点；两分钟内的成功点取中位数，不要求满窗口。'],
-        ['rtt_switch_margin_ms', 'RTT 改善阈值（毫秒）', 0, 'any', '同层主动切换至少需要的延迟改善。']
+        ['rtt_switch_margin_ms', 'RTT 改善阈值（毫秒）', 0, 'any', '健康节点主动切换至少需要的延迟改善。']
       ];
       function field(parent, name, label, type, value, hint = '', attributes = {}) {
         const wrapper = document.createElement('label'), title = document.createElement('span');
@@ -285,82 +291,128 @@
         parent.append(wrapper);
       }
       function markFormDirty() { formDirty = true; $('diff').hidden = true; }
-      function nodeTier(card) {
-        const input = card.querySelector('[data-field="tier"]');
-        return input.validity.valid ? input.valueAsNumber : NaN;
-      }
-      function sortNodeCards() {
-        const cards = Array.from($('node-fields').children);
-        if (cards.every(card => Number.isFinite(nodeTier(card)))) {
-          const active = document.activeElement;
-          cards.sort((a, b) => nodeTier(a) - nodeTier(b));
-          cards.forEach((card, index) => {
-            if ($('node-fields').children[index] !== card) {
-              $('node-fields').insertBefore(card, $('node-fields').children[index]);
-            }
-          });
-          if (active && $('node-fields').contains(active) && document.activeElement !== active) {
-            active.focus({preventScroll: true});
-          }
-        }
-        updateNodeActions();
-      }
+      const nodeCards = () => Array.from($('node-fields').querySelectorAll('.node-form'));
+      const canReorder = () => !busy && !!csrf && !$('form-fields').disabled;
       function updateNodeActions() {
-        const nodes = Array.from($('node-fields').children);
-        nodes.forEach((node, index) => {
-          const sameTier = other => other && Number.isFinite(nodeTier(node)) && nodeTier(node) === nodeTier(other);
-          for (const [action, unavailable] of [['up', !sameTier(nodes[index - 1])], ['down', !sameTier(nodes[index + 1])], ['remove', nodes.length === 1]]) {
-            const button = node.querySelector(`[data-action="${action}"]`);
-            button.disabled = busy || unavailable;
-            if (busy) button.dataset.wasDisabled = String(unavailable);
-          }
-          node.querySelector('legend').textContent = '节点 ' + (index + 1);
-        });
+        const cards = nodeCards();
+        for (const card of cards) {
+          const remove = card.querySelector('[data-action="remove"]');
+          remove.disabled = busy || !csrf || cards.length === 1;
+          if (busy) remove.dataset.wasDisabled = String(cards.length === 1);
+          card.querySelector('.drag-handle').disabled = busy || !csrf;
+          const id = card.querySelector('[data-field="id"]').value || '新节点';
+          card.querySelector('.node-name').textContent = id;
+          card.querySelector('.drag-handle').setAttribute('aria-label', '拖动排序：' + id);
+        }
       }
-      function addNode(node) {
+      function movedCard(card, before) {
+        if (!canReorder() || before === card || card.nextElementSibling === before) return;
+        $('node-fields').insertBefore(card, before);
+        nodeCards().forEach((node, index) => { node.dataset.tier = index; });
+        markFormDirty(); updateNodeActions();
+        $('node-order-status').textContent = '展示顺序已调整；自动选择仍按有效 RTT 排名，尚未保存。';
+      }
+      function addNode(node, position) {
         const card = document.createElement('fieldset'), legend = document.createElement('legend');
-        card.className = 'node-form'; card.append(legend);
+        card.className = 'node-form'; card.dataset.tier = node.tier; card.dataset.position = position; card.append(legend);
+        const handle = document.createElement('button'), name = document.createElement('span');
+        handle.type = 'button'; handle.className = 'drag-handle'; handle.textContent = '⠿ 拖动';
+        handle.setAttribute('aria-describedby', 'node-order-help'); name.className = 'node-name'; legend.append(handle, name);
+        handle.addEventListener('keydown', event => {
+          if (!canReorder() || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+          event.preventDefault();
+          if (event.key === 'ArrowUp' && card.previousElementSibling) movedCard(card, card.previousElementSibling);
+          if (event.key === 'ArrowDown' && card.nextElementSibling) movedCard(card, card.nextElementSibling.nextElementSibling);
+          handle.focus();
+        });
         const grid = document.createElement('div'); grid.className = 'form-grid'; card.append(grid);
         field(grid, 'id', '节点 ID', 'text', node.id, '字母、数字、下划线或连字符。', {pattern: '[A-Za-z0-9_\\-]+'});
         field(grid, 'address', 'Relay 地址', 'text', node.address, 'host:port 或 [IPv6]:port。');
-        field(grid, 'tier', '优先层级', 'number', node.tier, '非负整数，数字越小越优先。', {min: 0, step: 1});
         const options = document.createElement('div'); options.className = 'node-options';
         const checks = document.createElement('div'); checks.className = 'checks';
-        for (const [name, label] of [['enabled', '启用节点'], ['rtt_ranked', '参与同层 RTT 排名']]) {
+        for (const [key, label] of [['enabled', '启用节点'], ['rtt_ranked', '参与 RTT 排名']]) {
           const wrapper = document.createElement('label'), input = document.createElement('input');
-          input.type = 'checkbox'; input.dataset.field = name; input.checked = node[name];
+          input.type = 'checkbox'; input.dataset.field = key; input.checked = node[key];
           wrapper.append(input, document.createTextNode(label)); checks.append(wrapper);
         }
-        const actions = document.createElement('div'); actions.className = 'actions';
-        for (const [action, label] of [['up', '上移'], ['down', '下移'], ['remove', '移除']]) {
-          const button = document.createElement('button'); button.type = 'button'; button.dataset.action = action; button.textContent = label;
-          button.addEventListener('click', () => {
-            if (busy) return;
-            if (action === 'up' && card.previousElementSibling && nodeTier(card) === nodeTier(card.previousElementSibling)) card.parentNode.insertBefore(card, card.previousElementSibling);
-            if (action === 'down' && card.nextElementSibling && nodeTier(card) === nodeTier(card.nextElementSibling)) card.parentNode.insertBefore(card.nextElementSibling, card);
-            if (action === 'remove' && $('node-fields').children.length > 1) card.remove();
-            markFormDirty(); updateNodeActions();
-          });
-          actions.append(button);
-        }
-        options.append(checks, actions); card.append(options); $('node-fields').append(card); sortNodeCards();
+        const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.action = 'remove'; remove.textContent = '移除';
+        remove.addEventListener('click', () => {
+          if (!canReorder() || nodeCards().length <= 1) return;
+          card.remove(); markFormDirty(); updateNodeActions();
+        });
+        options.append(checks, remove); card.append(options); $('node-fields').append(card); updateNodeActions();
       }
+      let drag = null;
+      function clearDrop() {
+        $('node-fields').querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
+      }
+      function cancelDrag() {
+        if (!drag) return;
+        const active = drag; drag = null; clearDrop(); active.card.classList.remove('dragging');
+        cancelAnimationFrame(active.frame);
+        if (active.handle.hasPointerCapture(active.id)) active.handle.releasePointerCapture(active.id);
+      }
+      $('node-fields').addEventListener('pointerdown', event => {
+        const card = event.target.closest('.node-form');
+        if (!card || event.button !== 0 || !canReorder()) return;
+        const onHandle = !!event.target.closest('.drag-handle');
+        if (!onHandle && (event.pointerType === 'touch' || event.target.closest('input, label, button'))) return;
+        const handle = card.querySelector('.drag-handle');
+        cancelDrag();
+        drag = {handle, card, id: event.pointerId, x: event.clientX, y: event.clientY, started: false, target: null, frame: null};
+        handle.setPointerCapture(event.pointerId);
+      });
+      $('node-fields').addEventListener('pointermove', event => {
+        if (!drag || drag.id !== event.pointerId) return;
+        if (!canReorder()) { cancelDrag(); return; }
+        if (!drag.started && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+        event.preventDefault(); drag.x = event.clientX; drag.y = event.clientY;
+        if (!drag.started) { drag.started = true; drag.card.classList.add('dragging'); dragFrame(); }
+        updateDrop();
+      });
+      function dragFrame() {
+        if (!drag || !canReorder()) { cancelDrag(); return; }
+        if (drag.y < 60) window.scrollBy(0, -12);
+        else if (drag.y > window.innerHeight - 60) window.scrollBy(0, 12);
+        updateDrop(); drag.frame = requestAnimationFrame(dragFrame);
+      }
+      function updateDrop() {
+        clearDrop(); drag.target = null;
+        const hit = document.elementFromPoint(drag.x, drag.y);
+        const card = hit && hit.closest('#node-fields .node-form');
+        if (card && card !== drag.card) {
+          const rect = card.getBoundingClientRect(), above = drag.y < rect.top + rect.height / 2;
+          drag.target = {before: above ? card : card.nextElementSibling};
+          card.classList.add(above ? 'drop-before' : 'drop-after');
+        }
+      }
+      $('node-fields').addEventListener('pointerup', event => {
+        if (!drag || drag.id !== event.pointerId) return;
+        if (drag.started) { drag.x = event.clientX; drag.y = event.clientY; updateDrop(); }
+        const active = drag; cancelDrag();
+        if (active.started && active.target) movedCard(active.card, active.target.before);
+        active.handle.focus();
+      });
+      $('node-fields').addEventListener('pointercancel', cancelDrag);
+      $('node-fields').addEventListener('lostpointercapture', cancelDrag);
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') cancelDrag(); });
       function renderForm(model) {
-        $('policy-fields').replaceChildren(); $('node-fields').replaceChildren();
+        cancelDrag(); $('policy-fields').replaceChildren(); $('node-fields').replaceChildren(); $('node-order-status').textContent = '';
         for (const [name, label, min, step, hint] of policyFields) {
           const attributes = {min, step};
           if (name === 'rtt_sample_count') attributes.max = 5;
           field($('policy-fields'), name, label, 'number', model.policy[name], hint, attributes);
         }
-        for (const node of model.nodes) addNode(node);
+        const ordered = model.nodes.map((node, position) => ({node, position})).sort((a, b) => a.node.tier - b.node.tier);
+        for (const {node, position} of ordered) addNode(node, position);
         formDirty = false;
       }
       function readForm() {
         if (!$('config-form').reportValidity()) throw new Error('请填写完整配置，并修正标出的字段。');
         const policy = {};
         $('policy-fields').querySelectorAll('input').forEach(input => { policy[input.dataset.field] = input.valueAsNumber; });
-        const nodes = Array.from($('node-fields').children, card => {
-          const node = {};
+        const nodes = nodeCards().sort((a, b) => Number(a.dataset.position) - Number(b.dataset.position)).map(card => {
+          const node = {tier: Number(card.dataset.tier)};
           card.querySelectorAll('input').forEach(input => {
             node[input.dataset.field] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? input.valueAsNumber : input.value;
           });
@@ -383,12 +435,14 @@
         $('text-mode').setAttribute('aria-pressed', String(mode === 'text'));
       }
       $('config-form').addEventListener('submit', event => event.preventDefault());
-      $('config-form').addEventListener('input', event => {
-        markFormDirty();
-        if (event.target.dataset.field === 'tier') sortNodeCards();
-      });
+      $('config-form').addEventListener('input', () => { markFormDirty(); updateNodeActions(); });
       $('config-text').addEventListener('input', () => { $('diff').hidden = true; });
-      $('add-node').addEventListener('click', () => { if (!busy) { addNode({id: '', address: '', tier: 20, enabled: true, rtt_ranked: true}); markFormDirty(); } });
+      $('add-node').addEventListener('click', () => {
+        if (!canReorder()) return;
+        const cards = nodeCards(), tier = Math.max(-1, ...cards.map(card => Number(card.dataset.tier))) + 1;
+        const position = Math.max(-1, ...cards.map(card => Number(card.dataset.position))) + 1;
+        addNode({id: '', address: '', tier, enabled: true, rtt_ranked: true}, position); markFormDirty();
+      });
       $('form-mode').addEventListener('click', () => {
         if (editMode === 'form') return;
         if (!original) { notice('请先载入配置。', true); return; }

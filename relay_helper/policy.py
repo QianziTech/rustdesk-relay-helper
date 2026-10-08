@@ -50,6 +50,18 @@ def effective_rtt(health, policy, now):
     return median(point['rtt_ms'] for point in points)
 
 
+def ranked_candidates(config, state, now):
+    """Order healthy RTT candidates, then healthy unranked fallbacks; ignore tier."""
+    for health in state['nodes'].values():
+        expire_health(health, config.policy, now)
+    healthy = [node for node in config.nodes
+               if node.enabled and state['nodes'][node.id]['health'] == 'healthy']
+    ranked = [node for node in healthy
+              if node.rtt_ranked and effective_rtt(state['nodes'][node.id], config.policy, now) is not None]
+    ranked.sort(key=lambda node: effective_rtt(state['nodes'][node.id], config.policy, now))
+    return ranked + [node for node in healthy if not node.rtt_ranked]
+
+
 def choose(config, state, actual, now):
     nodes = [node for node in config.nodes if node.enabled]
     health = state['nodes']
@@ -64,17 +76,12 @@ def choose(config, state, actual, now):
             return None, '手动目标探测失败或非健康；保留固定模式并提示故障'
         return target, '手动固定'
 
-    candidates = []
-    for tier in sorted({node.tier for node in nodes}):
-        healthy = [n for n in nodes if n.tier == tier and health[n.id]['health'] == 'healthy']
-        ranked = [n for n in healthy if n.rtt_ranked and effective_rtt(health[n.id], policy, now) is not None]
-        candidates.extend(sorted(ranked, key=lambda n: effective_rtt(health[n.id], policy, now)))
-        candidates.extend(n for n in healthy if not n.rtt_ranked)
+    candidates = ranked_candidates(config, state, now)
     if not candidates:
         return None, '无已验证可用节点；保留实际值'
     best = candidates[0]
     if state.get('auto_reselect'):
-        return best, '恢复自动模式，重新按层级与 RTT 选择最优节点'
+        return best, '恢复自动模式，重新按有效 RTT 选择最优节点'
     # When hbbs has restarted, retain the last confirmed choice during hold time.
     current_address = actual[0] if len(actual) == 1 else state.get('confirmed_target') if not actual else None
     current = next((n for n in nodes if n.address == current_address), None)
@@ -84,18 +91,16 @@ def choose(config, state, actual, now):
         return None, '当前节点健康未知；等待探测确认'
     if best.id == current.id:
         return current, '保持当前最优节点'
-    if best.tier > current.tier:
-        return current, '当前节点健康，保留更高优先级'
     if now - state.get('last_switch', 0) < policy.minimum_hold_seconds:
         return current, '保持期内，暂不主动切换'
-    if best.tier < current.tier:
-        return best, '更高优先级节点恢复'
     if current.rtt_ranked:
+        current_rtt = effective_rtt(health[current.id], policy, now)
+        if current_rtt is None:
+            return best, '当前节点无有效 RTT；选择可用候选'
         if not best.rtt_ranked:
             return current, '当前排名节点健康'
-        current_rtt = effective_rtt(health[current.id], policy, now)
         best_rtt = effective_rtt(health[best.id], policy, now)
-        if current_rtt is None or best_rtt >= current_rtt or current_rtt - best_rtt < policy.rtt_switch_margin_ms:
+        if best_rtt >= current_rtt or current_rtt - best_rtt < policy.rtt_switch_margin_ms:
             return current, 'RTT 样本不足或改善未达到阈值'
-        return best, '同层 RTT 改善达到阈值'
-    return best, '同层排名节点恢复或配置顺序优先'
+        return best, 'RTT 改善达到阈值'
+    return best, 'RTT 排名节点可用或配置顺序兜底'

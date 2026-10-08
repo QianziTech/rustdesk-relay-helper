@@ -171,7 +171,7 @@ class ServiceTests(unittest.TestCase):
             operate(config, state, console, 'switch', 'fallback')
             console.read.return_value = ['fallback.test:21117']
             operate(config, state, console, 'auto')
-            console.apply.assert_called_with('a.test:21117')
+            console.apply.assert_called_with('lower.test:21117')
             self.assertEqual(state['mode'], 'auto')
             self.assertFalse(state['auto_reselect'])
             # The explicit resume bypass applies once, subsequent automatic runs keep the contract.

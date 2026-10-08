@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 
 from relay_helper.config import Config, Node, Policy
-from relay_helper.policy import choose, effective_rtt, expire_health, new_health, record_probe
+from relay_helper.policy import choose, effective_rtt, expire_health, new_health, ranked_candidates, record_probe
 
 
 class PolicyTests(unittest.TestCase):
@@ -43,11 +43,14 @@ class PolicyTests(unittest.TestCase):
         record_probe(self.state['nodes']['a'], None, 'down', 1000, self.config.policy)
         self.assertEqual(self.selected(), 'lower')
 
-    def test_tier_beats_rtt(self):
+    def test_display_tier_does_not_override_lowest_rtt(self):
         self.healthy('a', 200)
         self.healthy('lower', 1)
-        self.assertEqual(self.selected(), 'a')
-        self.assertEqual(self.selected('lower'), 'a')
+        self.assertEqual(self.selected(), 'lower')
+        self.assertEqual(self.selected('lower'), 'lower')
+        self.config = replace(self.config, nodes=tuple(replace(n, tier=0 if n.id == 'a' else 1000)
+                                                     for n in self.config.nodes))
+        self.assertEqual(self.selected(None), 'lower')
 
     def test_rtt_margin_and_hold(self):
         self.healthy('a', 50)
@@ -59,15 +62,15 @@ class PolicyTests(unittest.TestCase):
         self.state['last_switch'] = 700
         self.assertEqual(self.selected(), 'b')
 
-    def test_auto_reselection_uses_tier_then_rtt_despite_hold_and_margin(self):
+    def test_auto_reselection_uses_global_rtt_despite_display_tier_hold_and_margin(self):
         self.healthy('a', 50)
         self.healthy('b', 49)
         self.healthy('fallback', 1)
         self.healthy('lower', 1)
         self.state.update(last_switch=999, auto_reselect=True)
-        self.assertEqual(self.selected('fallback'), 'b')
-        self.assertEqual(self.selected('a'), 'b')
-        self.assertEqual(self.selected('lower'), 'b')
+        self.assertEqual(self.selected('fallback'), 'lower')
+        self.assertEqual(self.selected('a'), 'lower')
+        self.assertEqual(self.selected('lower'), 'lower')
         self.state.update(mode='manual', manual_target='fallback')
         self.assertEqual(self.selected('fallback'), 'fallback')
 
@@ -143,12 +146,47 @@ class PolicyTests(unittest.TestCase):
     def test_fallback_is_automatic_and_does_not_compete_on_rtt(self):
         self.healthy('fallback', 1)
         self.healthy('lower', 1)
-        self.assertEqual(self.selected(None), 'fallback')
+        self.assertEqual(self.selected(None), 'lower')
         self.healthy('a', 500)
-        self.assertEqual(self.selected(None), 'a')
-        self.assertEqual(self.selected('fallback'), 'a')
+        self.assertEqual(self.selected(None), 'lower')
+        self.assertEqual(self.selected('fallback'), 'lower')
         self.state['last_switch'] = 900
         self.assertEqual(self.selected('fallback'), 'fallback')
+
+    def test_cross_tier_rtt_switch_still_respects_hold_and_margin(self):
+        self.healthy('a', 50)
+        self.healthy('lower', 31)
+        self.assertEqual(self.selected(), 'a')
+        self.healthy('lower', 30)
+        self.state['last_switch'] = 900
+        self.assertEqual(self.selected(), 'a')
+        self.state['last_switch'] = 700
+        self.assertEqual(self.selected(), 'lower')
+
+    def test_rank_order_excludes_disabled_failed_and_insufficient_samples(self):
+        self.healthy('a', 80)
+        self.healthy('b', 10)
+        self.healthy('lower', 1)
+        self.healthy('fallback', .1)
+        self.config = replace(self.config, nodes=tuple(replace(n, enabled=False) if n.id == 'lower' else n
+                                                     for n in self.config.nodes))
+        self.assertEqual([n.id for n in ranked_candidates(self.config, self.state, 1000)], ['b', 'a', 'fallback'])
+        for _ in range(3):
+            record_probe(self.state['nodes']['b'], None, 'down', 1000, self.config.policy)
+        self.assertEqual([n.id for n in ranked_candidates(self.config, self.state, 1000)], ['a', 'fallback'])
+        self.state['nodes']['a']['samples'] = []
+        self.assertEqual([n.id for n in ranked_candidates(self.config, self.state, 1000)], ['fallback'])
+        self.assertEqual(self.selected(None), 'fallback')
+
+    def test_equal_rtt_and_unranked_fallbacks_use_config_order_not_tier(self):
+        self.healthy('a', 10)
+        self.healthy('b', 10)
+        self.config = replace(self.config, nodes=tuple(replace(n, tier=0 if n.id == 'b' else 1000)
+                                                     for n in self.config.nodes))
+        self.assertEqual(self.selected(None), 'a')
+        self.assertEqual(self.selected('b'), 'b')
+        self.config = replace(self.config, nodes=tuple(replace(n, rtt_ranked=False) for n in self.config.nodes))
+        self.assertEqual(self.selected(None), 'a')
 
     def test_pure_priority_configuration_order(self):
         self.config = replace(self.config, nodes=tuple(replace(n, rtt_ranked=False) for n in self.config.nodes))
