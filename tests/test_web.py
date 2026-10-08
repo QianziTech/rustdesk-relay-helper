@@ -179,6 +179,34 @@ class SessionTests(unittest.TestCase):
 
 class BackendTests(BackendFixture):
 
+    def test_web_probe_persists_one_count_and_one_point_per_round(self):
+        self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
+        with patch('relay_helper.service.probe_tcp', return_value=(12, None)) as tcp:
+            for count in range(1, 8):
+                code, result = self.backend.run('probe')
+                self.assertEqual(code, 200)
+                health = result['data']['nodes'][0]['health']
+                self.assertEqual(health['successes'], count)
+                self.assertEqual(len(health['samples']), min(count, 5))
+                self.assertEqual(len(health['last_attempts']), 2)
+                saved = load_state(self.state_path, load_config(self.config_path))
+                self.assertEqual(saved['nodes']['a']['successes'], count)
+            self.assertEqual(tcp.call_count, 14)
+
+    def test_web_auto_reselects_from_manual_fallback_during_hold(self):
+        self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n'
+                                    '[node:fallback]\naddress=fallback.test:21117\ntier=20\nrtt_ranked=false\n',
+                                    encoding='utf-8')
+        with patch('relay_helper.service.probe_tcp', return_value=(12, None)), patch('relay_helper.web.Console') as cls:
+            cls.return_value.read.return_value = []
+            cls.return_value.apply.return_value = True
+            self.backend.run('switch', 'fallback')
+            cls.return_value.read.return_value = ['fallback.test:21117']
+            code, result = self.backend.run('auto')
+        self.assertEqual(code, 200)
+        self.assertEqual(result['data']['state']['actual'], ['a.test:21117'])
+        self.assertFalse(load_state(self.state_path, load_config(self.config_path))['auto_reselect'])
+
     def test_first_point_ranks_and_status_hides_expired_rtt_preserving_manual_mode(self):
         self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
         with patch('relay_helper.web.time.time', return_value=1000), \

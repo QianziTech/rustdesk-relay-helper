@@ -160,6 +160,14 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(load_state(path, altered)['nodes']['a']['health'], 'unknown')
         self.assertEqual(list(self.path.glob('*.tmp')), [])
 
+    def test_invalid_auto_reselection_flag_rejected(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        state['auto_reselect'] = 'true'
+        save_state(path, state)
+        with self.assertRaises(ValueError):
+            load_state(path, self.config)
+
     def test_legacy_samples_discarded_without_losing_manual_or_confirmed_target(self):
         path = self.path / 'state.json'
         state = load_state(path, self.config)

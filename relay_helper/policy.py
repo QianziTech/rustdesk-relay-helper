@@ -31,13 +31,13 @@ def record_probe(health, rtt_ms, error, now, policy):
     health.update(last_probe=now, rtt_ms=rtt_ms, error=error, source='CNHZ')
     if rtt_ms is None:
         health['successes'] = 0
-        health['failures'] = min(health['failures'] + 1, policy.fail_after)
+        health['failures'] += 1
         if health['failures'] >= policy.fail_after:
             health['health'] = 'unhealthy'
             health['samples'] = []
     else:
         health['failures'] = 0
-        health['successes'] = min(health['successes'] + 1, policy.recover_after)
+        health['successes'] += 1
         health['samples'] = (health['samples'] + [dict(at=now, rtt_ms=rtt_ms)])[-policy.rtt_sample_count:]
         if health['health'] != 'unhealthy' or health['successes'] >= policy.recover_after:
             health['health'] = 'healthy'
@@ -73,6 +73,8 @@ def choose(config, state, actual, now):
     if not candidates:
         return None, '无已验证可用节点；保留实际值'
     best = candidates[0]
+    if state.get('auto_reselect'):
+        return best, '恢复自动模式，重新按层级与 RTT 选择最优节点'
     # When hbbs has restarted, retain the last confirmed choice during hold time.
     current_address = actual[0] if len(actual) == 1 else state.get('confirmed_target') if not actual else None
     current = next((n for n in nodes if n.address == current_address), None)

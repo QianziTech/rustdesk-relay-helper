@@ -59,6 +59,18 @@ class PolicyTests(unittest.TestCase):
         self.state['last_switch'] = 700
         self.assertEqual(self.selected(), 'b')
 
+    def test_auto_reselection_uses_tier_then_rtt_despite_hold_and_margin(self):
+        self.healthy('a', 50)
+        self.healthy('b', 49)
+        self.healthy('fallback', 1)
+        self.healthy('lower', 1)
+        self.state.update(last_switch=999, auto_reselect=True)
+        self.assertEqual(self.selected('fallback'), 'b')
+        self.assertEqual(self.selected('a'), 'b')
+        self.assertEqual(self.selected('lower'), 'b')
+        self.state.update(mode='manual', manual_target='fallback')
+        self.assertEqual(self.selected('fallback'), 'fallback')
+
     def test_median_not_single_outlier(self):
         self.healthy('a', 50)
         self.healthy('b', 60)

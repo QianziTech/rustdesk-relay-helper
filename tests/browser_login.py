@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from relay_helper.web import Backend, LocalServer, REMEMBER_SECONDS
+from relay_helper.config import load_config
+from relay_helper.io import load_state
 
 try:
     from playwright.sync_api import expect, sync_playwright
@@ -32,11 +34,12 @@ class BrowserLoginTests(unittest.TestCase):
         self.backend = Backend(self.config_path, Path(self.tmp.name) / 'state.json')
         console = patch('relay_helper.web.Console')
         fake = console.start().return_value
+        self.console = fake
         self.addCleanup(console.stop)
         fake.read.return_value = ['a.test:21117']
         fake.apply.return_value = True
         probe = patch('relay_helper.service.probe_tcp', return_value=(12, None))
-        probe.start()
+        self.tcp = probe.start()
         self.addCleanup(probe.stop)
         self.start_server()
         self.addCleanup(self.stop_server)
@@ -171,6 +174,84 @@ class BrowserLoginTests(unittest.TestCase):
                 self.assertNotIn('authorization', headers)
                 if method == 'POST':
                     self.assertIn('x-csrf-token', headers)
+        self.assertEqual(self.errors, [])
+
+    def test_probe_counts_rounds_and_failed_healthy_node_can_retry_switch(self):
+        self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
+        page = self.page
+        page.goto(self.url)
+        self.login()
+        for count in (1, 2):
+            page.locator('#probe').click()
+            expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text(f'{count} / 0')
+            expect(page.locator('#notice')).to_contain_text('探测已完成')
+            state = load_state(self.backend.state_path, load_config(self.config_path))
+            self.assertEqual(len(state['nodes']['a']['samples']), count)
+            self.assertEqual(self.tcp.call_count, 2 * count)
+        self.tcp.side_effect = [(12, None), (None, 'temporary timeout')]
+        page.locator('#probe').click()
+        expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text('0 / 1')
+        expect(page.locator('#nodes tr button')).to_be_enabled()
+        self.tcp.side_effect = None
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#nodes tr button').click()
+        expect(page.locator('#notice')).to_contain_text('手动模式已应用')
+        expect(page.locator('#mode')).to_have_text('手动固定')
+        expect(page.locator('#nodes tr').locator('td').nth(3)).to_have_text('1 / 0')
+        self.assertEqual(self.tcp.call_count, 8)
+        self.assertEqual(self.errors, [])
+
+    def test_tier_sorting_during_edit_preserves_focus_and_same_tier_order(self):
+        text = ('[policy]\n# keep policy comment\n'
+                '[node:b]\naddress=b.test:21117\ntier=30\n'
+                '[node:c]\naddress=c.test:21117\ntier=10\n'
+                '[node:a]\naddress=a.test:21117\ntier=20\n'
+                '[node:d]\naddress=d.test:21117\ntier=10\nenabled=false\n')
+        self.config_path.write_text(text, encoding='utf-8')
+        page = self.page
+        page.goto(self.url)
+        self.login()
+        expect(page.locator('#nodes tr').locator('td:first-child')).to_have_text([
+            'cc.test:21117', 'dd.test:21117', 'aa.test:21117', 'bb.test:21117'])
+        page.locator('#config-panel summary').click()
+        ids = page.locator('#node-fields [data-field=id]')
+        expect(ids.nth(3)).to_have_value('b')
+        order = lambda: ids.evaluate_all('(inputs) => inputs.map(input => input.value)')
+        self.assertEqual(order(), ['c', 'd', 'a', 'b'])
+        tier = page.locator('#node-fields [data-field=tier]').nth(3).element_handle()
+        tier.fill('5')
+        self.assertEqual(order(), ['b', 'c', 'd', 'a'])
+        self.assertTrue(tier.evaluate('(input) => document.activeElement === input'))
+        tier.fill('')
+        self.assertEqual(order(), ['b', 'c', 'd', 'a'])
+        tier.fill('40')
+        self.assertEqual(order(), ['c', 'd', 'a', 'b'])
+        self.assertTrue(tier.evaluate('(input) => document.activeElement === input'))
+        page.locator('#node-fields [data-action=down]').nth(0).click()
+        self.assertEqual(order(), ['d', 'c', 'a', 'b'])
+        expect(page.locator('#node-fields [data-action=down]').nth(1)).to_be_disabled()
+        page.locator('#add-node').click()
+        self.assertEqual(order(), ['d', 'c', 'a', '', 'b'])
+        new = page.locator('#node-fields .node-form').nth(3)
+        new.locator('[data-field=id]').fill('new')
+        new.locator('[data-field=address]').fill('new.test:21117')
+        new.locator('[data-field=tier]').fill('0')
+        self.assertEqual(order(), ['new', 'd', 'c', 'a', 'b'])
+        page.locator('#text-mode').click()
+        expect(page.locator('#config-text')).to_be_visible()
+        draft = page.locator('#config-text').input_value()
+        self.assertIn('# keep policy comment', draft)
+        self.assertEqual([node.id for node in load_config(self.config_path).nodes], ['b', 'c', 'a', 'd'])
+        page.locator('#form-mode').click()
+        expect(ids.nth(0)).to_have_value('new')
+        self.assertEqual(order(), ['new', 'd', 'c', 'a', 'b'])
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#save-config').click()
+        expect(page.locator('#notice')).to_contain_text('配置已校验并保存')
+        self.assertEqual([node.id for node in load_config(self.config_path).nodes], ['new', 'd', 'c', 'a', 'b'])
+        page.locator('#load-config').click()
+        expect(page.locator('#notice')).to_contain_text('配置已载入')
+        self.assertEqual(order(), ['new', 'd', 'c', 'a', 'b'])
         self.assertEqual(self.errors, [])
 
 

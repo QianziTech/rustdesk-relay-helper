@@ -143,6 +143,76 @@ class ServiceTests(unittest.TestCase):
             probe(self.config, self.state)
         self.assertEqual(self.state['nodes']['a']['health'], 'healthy')
 
+    def test_round_counts_continue_after_thresholds(self):
+        with patch('relay_helper.service.probe_tcp', return_value=(10, None)) as tcp:
+            for count in range(1, 9):
+                probe(self.config, self.state)
+                self.assertEqual(self.state['nodes']['a']['successes'], count)
+                self.assertEqual(len(self.state['nodes']['a']['samples']), min(count, 5))
+            self.assertEqual(tcp.call_count, 16)
+        with patch('relay_helper.service.probe_tcp', return_value=(None, 'down')) as tcp:
+            for count in range(1, 6):
+                probe(self.config, self.state)
+                self.assertEqual(self.state['nodes']['a']['failures'], count)
+                self.assertEqual(self.state['nodes']['a']['successes'], 0)
+            self.assertEqual(tcp.call_count, 10)
+
+    def test_resume_auto_reselects_once_then_respects_hold_and_margin(self):
+        config = Config(Policy(), (Node('a', 'a.test:21117', 10),
+                                  Node('b', 'b.test:21117', 10),
+                                  Node('fallback', 'fallback.test:21117', 10, rtt_ranked=False),
+                                  Node('lower', 'lower.test:21117', 20)))
+        state = load_state(self.path, config)
+        console = Mock()
+        console.read.return_value = []
+        console.apply.return_value = True
+        latencies = {'a': 10, 'b': 15, 'fallback': 1, 'lower': 1}
+        with patch('relay_helper.service.probe_tcp', side_effect=lambda node, timeout: (latencies[node.id], None)):
+            operate(config, state, console, 'switch', 'fallback')
+            console.read.return_value = ['fallback.test:21117']
+            operate(config, state, console, 'auto')
+            console.apply.assert_called_with('a.test:21117')
+            self.assertEqual(state['mode'], 'auto')
+            self.assertFalse(state['auto_reselect'])
+            # The explicit resume bypass applies once, subsequent automatic runs keep the contract.
+            console.read.return_value = ['b.test:21117']
+            operate(config, state, console, 'reconcile')
+            console.apply.assert_called_with('b.test:21117')
+            state['last_switch'] = 0
+            operate(config, state, console, 'auto')
+            console.apply.assert_called_with('b.test:21117')
+
+    def test_resume_auto_retries_after_console_failure_across_reload(self):
+        self.state.update(mode='manual', manual_target='a')
+        console = Mock()
+        console.read.side_effect = ConsoleError('offline')
+        with patch('relay_helper.service.probe_tcp', return_value=(10, None)):
+            with self.assertRaises(ConsoleError):
+                operate(self.config, self.state, console, 'auto')
+            self.assertTrue(self.state['auto_reselect'])
+            save_state(self.path, self.state)
+            state = load_state(self.path, self.config)
+            console.read.side_effect = None
+            console.read.return_value = ['external:21117']
+            console.apply.return_value = True
+            operate(self.config, state, console, 'reconcile')
+        console.apply.assert_called_once_with('a.test:21117')
+        self.assertFalse(state['auto_reselect'])
+
+    def test_resume_without_candidates_keeps_reselection_until_next_probe(self):
+        self.state.update(mode='manual', manual_target='a')
+        console = Mock()
+        console.read.return_value = ['external:21117']
+        with patch('relay_helper.service.probe_tcp', return_value=(None, 'down')):
+            operate(self.config, self.state, console, 'auto')
+        console.apply.assert_not_called()
+        self.assertTrue(self.state['auto_reselect'])
+        self.assertEqual(self.state['actual'], ['external:21117'])
+        with patch('relay_helper.service.probe_tcp', return_value=(10, None)):
+            operate(self.config, self.state, console, 'reconcile')
+        console.apply.assert_called_once_with('a.test:21117')
+        self.assertFalse(self.state['auto_reselect'])
+
     def test_switch_probes_only_target_and_preserves_other_node_samples(self):
         config = Config(self.config.policy, self.config.nodes + (Node('b', 'b.test:21117', 20),))
         state = load_state(self.path, config)

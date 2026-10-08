@@ -76,6 +76,7 @@ def reconcile(config, state, console):
         state['last_switch'] = time.time()
         LOG.info('switch target=%s reason=%s', target.address, reason)
     state['pending_target'] = None
+    state['auto_reselect'] = False
 
 
 def set_manual(config, state, node_id):
@@ -88,6 +89,7 @@ def set_manual(config, state, node_id):
         raise ValueError('节点最近状态不健康；请先执行 probe 积累恢复计数')
     state['mode'] = 'manual'
     state['manual_target'] = node.id
+    state['auto_reselect'] = False
     LOG.info('mode=manual target=%s', node.id)
 
 
@@ -107,7 +109,8 @@ def operate(config, state, console, command, node_id=None):
     if command == 'switch':
         set_manual(config, state, node_id)
     elif command == 'auto':
-        state.update(mode='auto', manual_target=None)
+        state.update(auto_reselect=state['mode'] == 'manual' or state.get('auto_reselect', False),
+                     mode='auto', manual_target=None)
         LOG.info('mode=auto')
     if command != 'probe':
         reconcile(config, state, console)

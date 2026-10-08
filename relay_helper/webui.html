@@ -105,7 +105,7 @@
           <div class="actions"><button id="refresh">刷新状态</button><button id="probe">立即探测</button><button id="auto" class="primary">恢复自动模式</button></div>
         </div>
         <div class="scroll"><table>
-          <thead><tr><th>节点 / 地址</th><th>层级</th><th>健康</th><th>成功 / 失败</th><th>最近 / 有效 RTT</th><th>最近探测</th><th>操作</th></tr></thead>
+          <thead><tr><th>节点 / 地址</th><th>层级</th><th>健康</th><th>连续成功 / 失败轮数</th><th>最近 / 有效 RTT</th><th>最近探测</th><th>操作</th></tr></thead>
           <tbody id="nodes"><tr><td colspan="7">正在载入节点…</td></tr></tbody>
         </table></div>
         <p class="hint">每轮连接两次，均成功时显示第二次 RTT。有效 RTT 使用最多五个、两分钟内的成功点中位数；不足五点也可排名。手动固定后，自动任务不会切走该节点。</p>
@@ -125,7 +125,7 @@
                   <h2>策略参数</h2>
                   <div id="policy-fields" class="form-grid"></div>
                   <div class="section-head"><h2>节点配置</h2><button id="add-node" type="button">添加节点</button></div>
-                  <p class="hint">层级数字越小越优先。未参与 RTT 排名的同层节点按下面的顺序接管。</p>
+                  <p class="hint">层级数字越小越优先，编辑时按层级升序排列。同层节点可上移、下移；未参与 RTT 排名的同层节点按此顺序接管。</p>
                   <div id="node-fields"></div>
                 </fieldset>
               </form>
@@ -164,7 +164,7 @@
         $('reason').textContent = state.reason || '尚未执行策略';
         $('policy').textContent = `新节点一轮成功确认健康 · 故障后连续 ${data.policy.recover_after} 轮成功恢复 · ${data.policy.fail_after} 轮失败判定故障 · 保持期 ${data.policy.minimum_hold_seconds} 秒`;
         $('nodes').replaceChildren();
-        for (const node of data.nodes) {
+        for (const node of [...data.nodes].sort((a, b) => a.tier - b.tier)) {
           const health = node.health, row = document.createElement('tr');
           const cell = text => { const el = document.createElement('td'); el.textContent = text; row.append(el); return el; };
           const identity = cell(node.id), address = document.createElement('small');
@@ -179,7 +179,7 @@
           cell(date(health.last_probe));
           const action = cell(''), button = document.createElement('button');
           button.textContent = state.mode === 'manual' && state.manual_target === node.id ? '已固定' : '固定此节点';
-          const unavailable = !node.enabled || health.health !== 'healthy' || health.rtt_ms == null;
+          const unavailable = !node.enabled || health.health !== 'healthy';
           button.disabled = busy || unavailable;
           if (busy) button.dataset.wasDisabled = String(unavailable);
           button.addEventListener('click', () => {
@@ -268,7 +268,7 @@
       const policyFields = [
         ['probe_interval_seconds', '探测间隔（秒）', 1, 1, '实际周期由 systemd timer 控制，修改后需同步。'],
         ['connect_timeout_seconds', '连接超时（秒）', 0.000000001, 'any', 'TCP 探测和 hbbs 控制请求的超时。'],
-        ['fail_after', '故障阈值（连续失败次数）', 1, 1, '达到阈值后判定不可用。'],
+        ['fail_after', '故障阈值（连续失败轮数）', 1, 1, '每轮连接两次，只计一轮；达到阈值后判定不可用。'],
         ['recover_after', '恢复阈值（连续成功轮数）', 1, 1, '故障节点须累计成功轮数；新节点一轮成功即可。'],
         ['minimum_hold_seconds', '最短保持时间（秒）', 0, 'any', '限制健康节点之间切换；故障逃离不等待。'],
         ['rtt_sample_count', 'RTT 样本上限', 1, 1, '1–5 点；两分钟内的成功点取中位数，不要求满窗口。'],
@@ -285,10 +285,31 @@
         parent.append(wrapper);
       }
       function markFormDirty() { formDirty = true; $('diff').hidden = true; }
+      function nodeTier(card) {
+        const input = card.querySelector('[data-field="tier"]');
+        return input.validity.valid ? input.valueAsNumber : NaN;
+      }
+      function sortNodeCards() {
+        const cards = Array.from($('node-fields').children);
+        if (cards.every(card => Number.isFinite(nodeTier(card)))) {
+          const active = document.activeElement;
+          cards.sort((a, b) => nodeTier(a) - nodeTier(b));
+          cards.forEach((card, index) => {
+            if ($('node-fields').children[index] !== card) {
+              $('node-fields').insertBefore(card, $('node-fields').children[index]);
+            }
+          });
+          if (active && $('node-fields').contains(active) && document.activeElement !== active) {
+            active.focus({preventScroll: true});
+          }
+        }
+        updateNodeActions();
+      }
       function updateNodeActions() {
         const nodes = Array.from($('node-fields').children);
         nodes.forEach((node, index) => {
-          for (const [action, unavailable] of [['up', index === 0], ['down', index === nodes.length - 1], ['remove', nodes.length === 1]]) {
+          const sameTier = other => other && Number.isFinite(nodeTier(node)) && nodeTier(node) === nodeTier(other);
+          for (const [action, unavailable] of [['up', !sameTier(nodes[index - 1])], ['down', !sameTier(nodes[index + 1])], ['remove', nodes.length === 1]]) {
             const button = node.querySelector(`[data-action="${action}"]`);
             button.disabled = busy || unavailable;
             if (busy) button.dataset.wasDisabled = String(unavailable);
@@ -315,14 +336,14 @@
           const button = document.createElement('button'); button.type = 'button'; button.dataset.action = action; button.textContent = label;
           button.addEventListener('click', () => {
             if (busy) return;
-            if (action === 'up' && card.previousElementSibling) card.parentNode.insertBefore(card, card.previousElementSibling);
-            if (action === 'down' && card.nextElementSibling) card.parentNode.insertBefore(card.nextElementSibling, card);
+            if (action === 'up' && card.previousElementSibling && nodeTier(card) === nodeTier(card.previousElementSibling)) card.parentNode.insertBefore(card, card.previousElementSibling);
+            if (action === 'down' && card.nextElementSibling && nodeTier(card) === nodeTier(card.nextElementSibling)) card.parentNode.insertBefore(card.nextElementSibling, card);
             if (action === 'remove' && $('node-fields').children.length > 1) card.remove();
             markFormDirty(); updateNodeActions();
           });
           actions.append(button);
         }
-        options.append(checks, actions); card.append(options); $('node-fields').append(card); updateNodeActions();
+        options.append(checks, actions); card.append(options); $('node-fields').append(card); sortNodeCards();
       }
       function renderForm(model) {
         $('policy-fields').replaceChildren(); $('node-fields').replaceChildren();
@@ -362,7 +383,10 @@
         $('text-mode').setAttribute('aria-pressed', String(mode === 'text'));
       }
       $('config-form').addEventListener('submit', event => event.preventDefault());
-      $('config-form').addEventListener('input', markFormDirty);
+      $('config-form').addEventListener('input', event => {
+        markFormDirty();
+        if (event.target.dataset.field === 'tier') sortNodeCards();
+      });
       $('config-text').addEventListener('input', () => { $('diff').hidden = true; });
       $('add-node').addEventListener('click', () => { if (!busy) { addNode({id: '', address: '', tier: 20, enabled: true, rtt_ranked: true}); markFormDirty(); } });
       $('form-mode').addEventListener('click', () => {
