@@ -14,6 +14,28 @@ python -m relay_helper --config config/relay-helper.example.ini --state var/stat
 
 Windows 可运行核心与测试；Bash、journal 和 systemd 在 Linux 使用。不要直接对示例域名运行生产探测。真实开发配置复制为 `config/local.ini`，状态使用 `var/state.json`，两者已被 `.gitignore` 排除。示例配置、测试与文档正常跟踪。
 
+## 控制台安装管理
+
+下载完整仓库或版本包后运行：
+
+```bash
+bash manage.sh
+# 安装、修复、更新、卸载需要 root；可直接运行：
+sudo bash manage.sh
+```
+
+直接进入中文菜单，支持安装、查看状态、修复、更新、回滚、卸载及恢复中断维护，不增加固定管理命令。程序目录可选择（默认 `/usr/local/lib/rustdesk-relay-helper`），必须属于 root，且路径及父目录不能被普通用户写入。配置和状态继续使用 `/etc/rustdesk-relay-helper` 与 `/var/lib/rustdesk-relay-helper`。安装完成会显示受管副本的 `manage.sh` 路径，删除下载目录不影响运行。
+
+按下文 README 已手动安装的，在菜单选择“安装/接管”识别已有入口、systemd 模板及实际目录，备份后接管，保留原源码目录、配置、状态、token 和服务启用情况。仅部署 service/timer、没有 WebUI 也可以接管；修改过的入口、单元或管理员 drop-in 需要人工核对，脚本不会静默覆盖。
+
+首次安装可填写真实节点，或暂时保留示例并保持服务关闭；真实配置已存在时保留。初次安装不启用自动 timer，不修改 hbbs。仍需完成下文首次启用自动执行的现场验收。可选启动的 WebUI 只监听本机 `127.0.0.1:8765`。
+
+更新时选择本地新版完整目录或 tar 安装包，保留配置、手动模式、状态和 token。更新期间停止 WebUI/timer，等待正在执行的单次 relay 任务完成，再切换版本，重新启动原先运行的 WebUI/timer，并保持原开机启用状态。菜单另外询问是否立即执行一次新版 `reconcile`；该操作可能写入 hbbs，默认不执行。WebUI 重启后需要重新登录，token 不变。不会重启 hbbs/hbbr。
+
+卸载默认保留配置、状态、token 和备份；彻底清除需要第二次明确确认。未知文件阻止删除，安装记录缺失时先接管，不猜测卸载范围。维护失败会尝试恢复旧部署；若保留了中断记录，在菜单选择“恢复中断维护”。修复副本损坏时需要同版源码；不兼容配置需先人工修正，不自动丢弃数据。所有本地版本暂时保留，当前版本和上一版用于回滚。
+
+权限提升需使用 sudo/root 重新运行菜单。脚本不自动安装系统依赖，不自动联网更新；后续 GitHub 在线入口设计见 [本地安装管理脚本设计](docs/本地安装管理脚本设计.md)。
+
 ## Linux 安装
 
 先将仓库放到 `/opt/rustdesk-relay-helper`。以下命令在该目录执行，创建配置和状态目录。systemd 默认以 root 运行，无需创建专用账户；已经在 root shell 中时可以省略 `sudo`。
