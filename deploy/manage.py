@@ -23,11 +23,12 @@ LOCK_DIR = Path('/run/rustdesk-relay-helper')
 ENTRY = Path('/usr/local/bin/rustdesk-relay-helper')
 UNITS = ('rustdesk-relay-helper.service', 'rustdesk-relay-helper.timer',
          'rustdesk-relay-helper-web.service')
-REQUIRED_FILES = ('manage.sh', 'deploy/manage.py', 'config/relay-helper.example.ini',
-                'relay_helper/__main__.py', 'relay_helper/config.py', 'relay_helper/io.py',
-                'relay_helper/service.py', 'relay_helper/policy.py', 'relay_helper/web.py',
-                'relay_helper/__init__.py', 'relay_helper/login.html', 'relay_helper/webui.html', 'LICENSE',
-                'bin/rustdesk-relay-helper', *(str(Path('deploy/systemd') / u) for u in UNITS))
+PAYLOAD_MANIFEST = 'deploy/payload.json'
+# Stable entry points used by this manager; implementation modules/resources belong to the target inventory.
+CONTRACT_FILES = {'manage.sh', 'deploy/manage.py', 'config/relay-helper.example.ini',
+                  'relay_helper/__main__.py', 'relay_helper/config.py', 'relay_helper/io.py',
+                  'relay_helper/__init__.py', 'bin/rustdesk-relay-helper',
+                  *(str(Path('deploy/systemd') / u) for u in UNITS)}
 MANIFEST = 'install.json'
 DEFAULT_PREFIX = '/usr/local/lib/rustdesk-relay-helper'
 
@@ -83,8 +84,10 @@ def mkdir(path, mode=0o750):
     os.chmod(path, mode)
 
 
-def atomic(path, data, mode=0o600):
-    secure_path(path)
+def atomic(path, data, mode=0o600, repair_leaf=False):
+    secure_path(path, repair_leaf=repair_leaf)
+    if repair_leaf and path.exists():
+        regular(path)
     fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -172,15 +175,66 @@ class Systemd:
                     raise RuntimeError('服务启动失败: ' + unit)
 
 
+def validate_names(names):
+    if not isinstance(names, (list, dict, set)) or not names:
+        raise ValueError('版本文件清单无效')
+    for name in names:
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', name)
+                or any(p in ('.', '..', '.git', '__pycache__') for p in name.split('/'))
+                or name == 'release.json' or name.startswith('var/')
+                or (name.startswith('config/') and name != 'config/relay-helper.example.ini')):
+            raise ValueError('版本文件清单包含不安全路径')
+    if len(set(names)) != len(names) or not CONTRACT_FILES <= set(names):
+        raise ValueError('版本文件清单无效或缺少管理接口文件')
+    if any(str(p) in names for n in names for p in Path(n).parents if str(p) != '.'):
+        raise ValueError('版本文件清单存在文件与目录冲突')
+    return set(names)
+
+
+def source_names(data):
+    if not isinstance(data, dict) or data.get('schema') != 1 or not isinstance(data.get('files'), list):
+        raise ValueError('目标版本文件清单格式不支持')
+    names = validate_names(data['files'])
+    if PAYLOAD_MANIFEST not in names:
+        raise ValueError('目标版本文件清单缺少自身')
+    return names
+
+
+def source_file(source, name):
+    path = source / name
+    if any(p.is_symlink() for p in (path,) + tuple(list(path.parents)[:len(Path(name).parts)])):
+        raise ValueError('源文件不能经过符号链接: ' + name)
+    return regular(path)
+
+
 def payload(source):
     source = Path(source)
-    files = {}
-    for name in REQUIRED_FILES:
-        path = source / name
-        if any(p.is_symlink() for p in (path,) + tuple(list(path.parents)[:len(Path(name).parts)])):
-            raise ValueError('源文件不能经过符号链接: ' + name)
-        files[name] = regular(path).read_bytes()
+    manifest = source_file(source, PAYLOAD_MANIFEST).read_bytes()
+    names = source_names(json.loads(manifest))
+    files = {PAYLOAD_MANIFEST: manifest}
+    for name in sorted(names - {PAYLOAD_MANIFEST}):
+        files[name] = source_file(source, name).read_bytes()
     return files
+
+
+def inventory_directories(names):
+    return {str(parent) for name in names for parent in Path(name).parents if str(parent) != '.'}
+
+
+def check_inventory(release, names):
+    expected = set(names)
+    files, directories = set(), set()
+    for path in release.rglob('*'):
+        if path.is_symlink():
+            raise ValueError('程序版本含无关文件或目录，取消删除')
+        name = str(path.relative_to(release))
+        if path.is_dir():
+            directories.add(name)
+        else:
+            regular(path)
+            files.add(name)
+    if files != expected or directories != inventory_directories(expected):
+        raise ValueError('程序版本含无关文件或目录，取消删除')
 
 
 @contextlib.contextmanager
@@ -358,6 +412,9 @@ class Manager:
         return int(interval), ready
 
     def prepare(self, prefix, files):
+        validate_names(files)
+        if PAYLOAD_MANIFEST in files and source_names(json.loads(files[PAYLOAD_MANIFEST])) != set(files):
+            raise ValueError('目标版本文件清单不一致')
         mkdir(prefix, 0o755)
         releases = prefix / 'releases'
         mkdir(releases, 0o755)
@@ -384,17 +441,27 @@ class Manager:
 
     def verify_release(self, release, files=None):
         secure_path(release, directory=True)
+        secure_path(release / 'release.json')
         saved = json.loads(regular(release / 'release.json').read_text())
-        expected_names = set(REQUIRED_FILES)
-        if not isinstance(saved, dict) or set(saved) != expected_names:
+        if not isinstance(saved, dict):
             raise ValueError('版本文件清单无效')
+        validate_names(saved)
+        if files is not None and set(saved) != set(files):
+            raise ValueError('同版本目录文件清单不一致')
         for name, expected in saved.items():
+            if not isinstance(expected, str) or not re.fullmatch('[a-f0-9]{64}', expected):
+                raise ValueError('版本文件校验值无效')
             path = release / name
             secure_path(path)
             if digest(regular(path).read_bytes()) != expected:
                 raise ValueError('程序文件损坏: ' + name)
             if files is not None and files[name] != path.read_bytes():
                 raise ValueError('同版本目录内容不一致')
+        # Releases created before payload.json continue to use their validated release inventory.
+        if PAYLOAD_MANIFEST in saved:
+            names = source_names(json.loads((release / PAYLOAD_MANIFEST).read_bytes()))
+            if names != set(saved):
+                raise ValueError('版本文件清单不一致')
         return saved
 
     def current_link(self, prefix, version):
@@ -464,8 +531,13 @@ class Manager:
             mkdir(prefix, 0o755)
             mkdir(prefix / 'releases', 0o755)
             for version, names in pending['uninstall_versions'].items():
-                if not re.fullmatch('[a-f0-9]{20}', version) or set(names) != set(REQUIRED_FILES) | {'release.json'}:
+                if not re.fullmatch('[a-f0-9]{20}', version):
                     raise ValueError('卸载版本清单无效')
+                original_release = folder / 'programs' / version
+                expected = set(self.verify_release(original_release)) | {'release.json'}
+                if set(names) != expected or len(names) != len(expected):
+                    raise ValueError('卸载版本清单无效')
+                check_inventory(original_release, expected)
                 for name in names:
                     destination = prefix / 'releases' / version / name
                     mkdir(destination.parent, 0o755)
@@ -539,6 +611,12 @@ class Manager:
         return new
 
     def status(self):
+        if os.getuid() != 0:
+            print('普通用户仅查看 systemd 服务状态；安装记录、配置和业务状态需 root 权限。')
+            for unit in UNITS:
+                print(unit, self.systemd.properties(unit))
+            print('完整检查请运行 sudo rustdesk-relay-helper manager；未安装时运行 sudo bash', SOURCE / 'manage.sh')
+            return
         record = self.read_record()
         if self.pending.exists():
             print('存在未完成维护，请选择恢复。')
@@ -714,10 +792,10 @@ class Manager:
                         if version_id(files) != record['current']:
                             raise ValueError('当前版本副本损坏；请下载同版修复或选择更新')
                         for name, data in files.items():
-                            secure_path(release / name)
+                            secure_path(release / name, repair_leaf=True)
                             mkdir((release / name).parent, 0o755)
-                            atomic(release / name, data, 0o755 if name == 'manage.sh' else 0o644)
-                        atomic(release / 'release.json', json.dumps({n: digest(d) for n, d in files.items()}).encode(), 0o644)
+                            atomic(release / name, data, 0o755 if name == 'manage.sh' else 0o644, repair_leaf=True)
+                        atomic(release / 'release.json', json.dumps({n: digest(d) for n, d in files.items()}).encode(), 0o644, repair_leaf=True)
                     for name in self.verify_release(release):
                         os.chmod(release / name, 0o755 if name == 'manage.sh' else 0o644)
                     for path, mode in ((CONFIG_DIR / 'config.ini', 0o640), (STATE_DIR / 'state.json', 0o600),
@@ -793,9 +871,7 @@ class Manager:
                     raise ValueError('程序目录含无关文件，取消卸载: ' + str(release))
                 known = self.verify_release(release)
                 expected = set(known) | {'release.json'}
-                actual = {str(p.relative_to(release)) for p in release.rglob('*') if not p.is_dir()}
-                if actual != expected or any(p.is_symlink() for p in release.rglob('*')):
-                    raise ValueError('程序版本含无关文件，取消卸载')
+                check_inventory(release, expected)
                 inventories[release] = expected
             if {p.name for p in prefix.iterdir()} != {'releases', 'current'}:
                 raise ValueError('程序根目录含无关文件，取消卸载')
@@ -829,7 +905,9 @@ class Manager:
                         for name in names:
                             secure_path(release / name)
                             (release / name).unlink()
-                        for directory in sorted((p for p in release.rglob('*') if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                        for name in sorted(inventory_directories(names), key=lambda n: len(Path(n).parts), reverse=True):
+                            directory = release / name
+                            secure_path(directory, directory=True)
                             directory.rmdir()
                         release.rmdir()
                     (prefix / 'current').unlink()
@@ -873,15 +951,8 @@ class Manager:
                         for release in path.iterdir():
                             if not re.fullmatch('[a-f0-9]{20}', release.name) or not release.is_dir():
                                 raise ValueError('卸载备份版本目录无效')
-                            allowed = set(REQUIRED_FILES) | {'release.json'}
-                            actual = set()
-                            for entry in release.rglob('*'):
-                                secure_path(entry)
-                                if not entry.is_dir():
-                                    regular(entry)
-                                    actual.add(str(entry.relative_to(release)))
-                            if actual != allowed:
-                                raise ValueError('卸载备份包含无关文件')
+                            allowed = set(self.verify_release(release)) | {'release.json'}
+                            check_inventory(release, allowed)
                     elif not path.is_file() or not (path.name.isdigit() or path.name in ('config.ini', 'state.json', 'webui.token')):
                         raise ValueError('备份目录含无关文件')
 
@@ -898,8 +969,10 @@ def main():
                '4': manager.update, '5': manager.rollback, '6': manager.uninstall, '7': manager.recover}
     while True:
         try:
-            record = manager.read_record()
-            if record:
+            record = manager.read_record() if os.getuid() == 0 else None
+            if os.getuid() != 0:
+                summary = '普通用户模式；可查看服务状态，完整检查与维护需 root 权限'
+            elif record:
                 summary = '已安装 ' + record['current'] + '，目录 ' + record['prefix']
             elif ENTRY.exists() or any((UNIT_DIR / u).exists() for u in UNITS):
                 summary = '发现已有手动部署，请选择状态核对或安装接管'

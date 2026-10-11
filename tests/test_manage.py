@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location('installer', Path(__file__).resolve().parents[1] / 'deploy/manage.py')
 manager = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(manager)
+SECURE_PATH = manager.secure_path
 
 
 class FakeSystemd:
@@ -211,6 +213,135 @@ class InstallationTests(unittest.TestCase):
         self.assertTrue(self.m.record.exists())
         self.assertEqual((release / 'unrelated').read_text(), 'keep')
 
+    def test_unknown_empty_directory_blocks_uninstall_before_service_stop(self):
+        record = self.install()
+        release = self.prefix / 'releases' / self.version
+        for name in ('unrelated', 'relay_helper/unrelated/nested'):
+            with self.subTest(name=name):
+                extra = release / name
+                extra.mkdir(parents=True)
+                self.systemd.calls.clear()
+                with patch.object(manager, 'confirm', side_effect=[True, False]):
+                    with self.assertRaisesRegex(ValueError, '无关文件或目录'):
+                        self.m.uninstall()
+                self.assertEqual(self.m.read_record(), record)
+                self.assertTrue(extra.is_dir())
+                self.assertEqual(self.systemd.calls, [])
+                shutil.rmtree(release / 'unrelated' if name == 'unrelated' else release / 'relay_helper/unrelated')
+
+    def test_uninstall_does_not_delete_empty_directory_added_after_preflight(self):
+        self.install()
+        release = self.prefix / 'releases' / self.version
+        extra = release / 'unrelated'
+        backup = self.m.backup
+
+        def add_directory(*args):
+            pending = backup(*args)
+            extra.mkdir()
+            return pending
+
+        with patch.object(self.m, 'backup', side_effect=add_directory), \
+                patch.object(manager, 'confirm', side_effect=[True, False]):
+            with self.assertRaises(OSError):
+                self.m.uninstall()
+        self.assertTrue(extra.is_dir())
+        self.assertTrue(self.m.pending.exists())
+        with patch.object(manager, 'confirm', return_value=True):
+            self.m.recover()
+        self.m.verify_release(release)
+        self.assertTrue(extra.is_dir())
+
+    def target_source(self):
+        source = self.root / 'new source'
+        source.mkdir()
+        for name, data in self.files.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        old_name, new_name = 'relay_helper/login.html', 'relay_helper/templates/login.html'
+        target = source / new_name
+        target.parent.mkdir()
+        (source / old_name).rename(target)
+        web = source / 'relay_helper/web.py'
+        web.write_text(web.read_text().replace('login.html', 'templates/login.html'))
+        (source / 'relay_helper/extra.py').write_text('VALUE = 42\n')
+        manifest = json.loads((source / manager.PAYLOAD_MANIFEST).read_text())
+        manifest['files'].remove(old_name)
+        manifest['files'].extend([new_name, 'relay_helper/extra.py'])
+        (source / manager.PAYLOAD_MANIFEST).write_text(json.dumps(manifest))
+        return source
+
+    def test_old_manager_updates_changed_inventory_and_rolls_back(self):
+        record = self.install()
+        source = self.target_source()
+        with patch.object(manager, 'ask', return_value=str(source)), patch.object(manager, 'confirm', side_effect=[True, False]):
+            self.m.update()
+        current = self.m.read_record()
+        release = self.prefix / 'releases' / current['current']
+        self.assertNotEqual(current['current'], record['current'])
+        self.assertEqual((release / 'relay_helper/extra.py').read_text(), 'VALUE = 42\n')
+        self.assertTrue((release / 'relay_helper/templates/login.html').is_file())
+        self.assertFalse((release / 'relay_helper/login.html').exists())
+        self.m.verify_release(release)
+        with patch.object(manager, 'confirm', return_value=True):
+            self.m.rollback()
+        self.assertEqual(self.m.read_record()['current'], record['current'])
+        with patch.object(manager, 'confirm', side_effect=[True, False]):
+            self.m.uninstall()
+        self.assertFalse(self.prefix.exists())
+
+    def test_tar_payload_uses_target_inventory(self):
+        import tarfile
+        source = self.target_source()
+        archive_path = self.root / 'new.tar'
+        with tarfile.open(archive_path, 'w') as archive:
+            archive.add(source, arcname='new')
+        with manager.source_directory(str(archive_path)) as extracted:
+            files = manager.payload(extracted)
+        self.assertIn('relay_helper/extra.py', files)
+        self.assertIn('relay_helper/templates/login.html', files)
+        self.assertNotIn('relay_helper/login.html', files)
+
+    def test_payload_rejects_invalid_or_incomplete_target_inventory(self):
+        source = self.target_source()
+        path = source / manager.PAYLOAD_MANIFEST
+        manifest = json.loads(path.read_text())
+        cases = [dict(manifest, schema=2), dict(manifest, files=manifest['files'] + ['../escape']),
+                 dict(manifest, files=manifest['files'] + ['/absolute']),
+                 dict(manifest, files=manifest['files'] + ['relay_helper/extra.py']),
+                 dict(manifest, files=manifest['files'] + ['relay_helper/missing.py']),
+                 dict(manifest, files=manifest['files'] + ['config/secret.ini']),
+                 dict(manifest, files=manifest['files'] + ['relay_helper/templates']),
+                 dict(manifest, files=[n for n in manifest['files'] if n != 'manage.sh'])]
+        for data in cases:
+            with self.subTest(data=data):
+                path.write_text(json.dumps(data))
+                with self.assertRaises(ValueError):
+                    manager.payload(source)
+        path.unlink()
+        with self.assertRaises(ValueError):
+            manager.payload(source)
+
+    def test_target_inventory_rejects_linked_files_and_directories(self):
+        source = self.target_source()
+        extra = source / 'relay_helper/extra.py'
+        extra.unlink()
+        extra.symlink_to(source / 'relay_helper/config.py')
+        with self.assertRaisesRegex(ValueError, '符号链接'):
+            manager.payload(source)
+        extra.unlink()
+        extra.write_text('VALUE = 42\n')
+        templates = source / 'relay_helper/templates'
+        templates.rename(source / 'templates')
+        templates.symlink_to(source / 'templates', target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '符号链接'):
+            manager.payload(source)
+
+    def test_release_without_source_manifest_remains_verifiable(self):
+        files = {name: data for name, data in self.files.items() if name != manager.PAYLOAD_MANIFEST}
+        version = self.m.prepare(self.prefix, files)
+        self.assertEqual(set(self.m.verify_release(self.prefix / 'releases' / version)), set(files))
+
     def test_rollback_preserves_current_data_and_swaps_previous(self):
         record = self.install()
         new = self.new_version()
@@ -237,7 +368,7 @@ class InstallationTests(unittest.TestCase):
         with manager.lock(manager.STATE_DIR / 'state.json.lock'):
             pending = self.m.backup(self.systemd.snapshot(), record)
             release = self.prefix / 'releases' / self.version
-            names = set(manager.REQUIRED_FILES) | {'release.json'}
+            names = set(self.m.verify_release(release)) | {'release.json'}
             pending['uninstall_versions'] = {self.version: sorted(names)}
             folder = manager.STATE_DIR / 'backups' / pending['backup']
             for name in names:
@@ -251,6 +382,31 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.m.read_record()['current'], self.version)
         self.m.verify_release(release)
         self.assertTrue(manager.ENTRY.exists())
+
+    def test_uninstall_backup_recovers_changed_target_inventory(self):
+        record = self.install()
+        version = self.m.prepare(self.prefix, manager.payload(self.target_source()))
+        record = self.m.transaction(record, self.prefix, version, self.python, 8765, 20, self.systemd.snapshot())
+        release = self.prefix / 'releases' / version
+        pending = self.m.backup(self.systemd.snapshot(), record)
+        names = set(self.m.verify_release(release)) | {'release.json'}
+        pending['uninstall_versions'] = {version: sorted(names)}
+        folder = manager.STATE_DIR / 'backups' / pending['backup']
+        for name in names:
+            destination = folder / 'programs' / version / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((release / name).read_bytes())
+        self.m.check_purge()
+        (release / 'relay_helper/extra.py').unlink()
+        self.m.restore_backup(pending)
+        self.m.verify_release(release)
+        self.assertEqual((release / 'relay_helper/extra.py').read_text(), 'VALUE = 42\n')
+        unknown = folder / 'programs' / version / 'unknown'
+        unknown.mkdir()
+        with self.assertRaisesRegex(ValueError, '无关文件或目录'):
+            self.m.check_purge()
+        with self.assertRaisesRegex(ValueError, '无关文件或目录'):
+            self.m.restore_backup(pending)
 
     def test_purge_clears_only_known_files(self):
         self.install()
@@ -293,6 +449,79 @@ class InstallationTests(unittest.TestCase):
             self.m.repair()
         self.assertTrue(manager.ENTRY.exists())
         self.assertEqual((manager.CONFIG_DIR / 'config.ini').read_bytes(), config)
+
+    @contextlib.contextmanager
+    def root_owned_fixture(self):
+        original_stat = Path.stat
+
+        def owned_stat(path, *args, **kwargs):
+            fields = list(original_stat(path, *args, **kwargs))
+            fields[4] = 0  # Simulate root ownership without changing the test runner's uid.
+            if path == Path('/tmp'):
+                fields[0] &= ~0o022
+            return os.stat_result(fields)
+
+        with patch.object(Path, 'stat', owned_stat), patch.object(manager, 'secure_path', SECURE_PATH):
+            yield
+
+    def test_repair_replaces_writable_release_leaves_and_manifest(self):
+        self.install()
+        release = self.prefix / 'releases' / self.version
+        for name in ('relay_helper/config.py', 'release.json'):
+            with self.subTest(name=name):
+                path = release / name
+                path.chmod(0o666)
+                with self.root_owned_fixture():
+                    with self.assertRaisesRegex(ValueError, '不可写'):
+                        self.m.verify_release(release)
+                    with patch.object(manager, 'confirm', return_value=True):
+                        self.m.repair()
+                    self.m.verify_release(release)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.m.pending.exists())
+
+    def test_repair_refuses_writable_parent_and_linked_leaf(self):
+        self.install()
+        release = self.prefix / 'releases' / self.version
+        parent = release / 'relay_helper'
+        parent.chmod(0o777)
+        with self.root_owned_fixture(), patch.object(manager, 'confirm', return_value=True):
+            with self.assertRaisesRegex(ValueError, '不可写'):
+                self.m.repair()
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o777)
+        parent.chmod(0o755)
+        leaf = release / 'relay_helper/config.py'
+        leaf.unlink()
+        leaf.symlink_to(manager.SOURCE / 'relay_helper/config.py')
+        with self.root_owned_fixture(), patch.object(manager, 'confirm', return_value=True):
+            with self.assertRaisesRegex(ValueError, '符号链接'):
+                self.m.repair()
+        self.assertTrue(leaf.is_symlink())
+
+    def test_unprivileged_status_does_not_read_private_files_or_create_state(self):
+        self.install()
+        with patch.object(manager.os, 'getuid', return_value=1000), \
+                patch.object(self.m, 'read_record', side_effect=PermissionError('private')), \
+                patch('builtins.print') as output:
+            self.m.status()
+        text = '\n'.join(str(c) for c in output.call_args_list)
+        self.assertIn('普通用户仅查看 systemd 服务状态', text)
+        for unit in manager.UNITS:
+            self.assertIn(unit, text)
+        self.assertIn('sudo', text)
+        self.assertFalse((manager.STATE_DIR / 'state.json').exists())
+
+    def test_unprivileged_menu_does_not_read_install_record(self):
+        with patch.object(manager.os, 'getuid', return_value=1000), \
+                patch.object(manager, 'Manager', return_value=self.m), \
+                patch.object(self.m, 'read_record', side_effect=PermissionError('private')) as read, \
+                patch.object(sys.stdin, 'isatty', return_value=True), \
+                patch.object(sys.stdout, 'isatty', return_value=True), \
+                patch.object(manager, 'ask', side_effect=['2', '0']), \
+                patch('builtins.input', return_value=''), patch('builtins.print') as output:
+            self.assertEqual(manager.main(), 0)
+        read.assert_not_called()
+        self.assertNotIn('操作未完成', str(output.call_args_list))
 
     def test_recover_quiescing_stage_restores_services_without_replacing_program(self):
         states = self.systemd.snapshot()
