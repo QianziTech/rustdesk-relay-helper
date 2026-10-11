@@ -1,0 +1,23 @@
+{
+    "schema": 1,
+    "files": [
+        "manage.sh",
+        "deploy/manage.py",
+        "deploy/payload.json",
+        "config/relay-helper.example.ini",
+        "relay_helper/__main__.py",
+        "relay_helper/config.py",
+        "relay_helper/io.py",
+        "relay_helper/service.py",
+        "relay_helper/policy.py",
+        "relay_helper/web.py",
+        "relay_helper/__init__.py",
+        "relay_helper/login.html",
+        "relay_helper/webui.html",
+        "LICENSE",
+        "bin/rustdesk-relay-helper",
+        "deploy/systemd/rustdesk-relay-helper.service",
+        "deploy/systemd/rustdesk-relay-helper.timer",
+        "deploy/systemd/rustdesk-relay-helper-web.service"
+    ]
+}
