@@ -266,6 +266,23 @@ class InstallationTests(unittest.TestCase):
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('reconcile', result.stdout)
+        self.assertIn('manager', result.stdout)
+        self.assertFalse(list((self.prefix / 'releases').rglob('__pycache__')))
+
+    def test_installed_manager_needs_terminal_but_not_business_configuration(self):
+        self.install()
+        (manager.CONFIG_DIR / 'config.ini').unlink()
+        environment = {**os.environ, 'PYTHONPATH': '/nonexistent', 'PYTHONHOME': '/nonexistent'}
+        help_result = subprocess.run(['bash', str(manager.ENTRY), 'help', 'manager'], cwd=self.root,
+                                     env=environment, text=True, capture_output=True)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn('安装管理菜单', help_result.stdout)
+        result = subprocess.run(['bash', str(manager.ENTRY), 'manager'], cwd=self.root,
+                                env=environment, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('请在交互终端运行 rustdesk-relay-helper manager', result.stderr)
+        self.assertFalse((manager.CONFIG_DIR / 'config.ini').exists())
+        self.assertFalse((manager.STATE_DIR / 'state.json').exists())
         self.assertFalse(list((self.prefix / 'releases').rglob('__pycache__')))
 
     def test_repair_rebuilds_missing_entry_and_preserves_configuration(self):

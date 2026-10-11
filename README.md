@@ -24,7 +24,15 @@ bash manage.sh
 sudo bash manage.sh
 ```
 
-直接进入中文菜单，支持安装、查看状态、修复、更新、回滚、卸载及恢复中断维护，不增加固定管理命令。程序目录可选择（默认 `/usr/local/lib/rustdesk-relay-helper`），必须属于 root，且路径及父目录不能被普通用户写入。配置和状态继续使用 `/etc/rustdesk-relay-helper` 与 `/var/lib/rustdesk-relay-helper`。安装完成会显示受管副本的 `manage.sh` 路径，删除下载目录不影响运行。
+直接进入中文菜单，支持安装、查看状态、修复、更新、回滚、卸载及恢复中断维护。安装后通过统一业务入口进入同一菜单：
+
+```bash
+rustdesk-relay-helper help
+rustdesk-relay-helper help manager
+sudo rustdesk-relay-helper manager
+```
+
+`manager` 是终端安装管理菜单；浏览器管理界面仍使用 `web`。程序目录可选择（默认 `/usr/local/lib/rustdesk-relay-helper`），必须属于 root，且路径及父目录不能被普通用户写入。配置和状态继续使用 `/etc/rustdesk-relay-helper` 与 `/var/lib/rustdesk-relay-helper`。`manager` 使用固定系统配置和状态路径，不使用业务命令的 `--config`、`--state` 覆盖。安装完成会显示受管副本的 `manage.sh` 路径，删除下载目录不影响运行。
 
 按下文 README 已手动安装的，在菜单选择“安装/接管”识别已有入口、systemd 模板及实际目录，备份后接管，保留原源码目录、配置、状态、token 和服务启用情况。仅部署 service/timer、没有 WebUI 也可以接管；修改过的入口、单元或管理员 drop-in 需要人工核对，脚本不会静默覆盖。
 
@@ -59,6 +67,7 @@ sudoedit /etc/rustdesk-relay-helper/config.ini
 ```bash
 rustdesk-relay-helper help
 rustdesk-relay-helper help switch
+sudo rustdesk-relay-helper manager
 sudo rustdesk-relay-helper status
 sudo rustdesk-relay-helper nodes
 sudo rustdesk-relay-helper probe
@@ -70,6 +79,7 @@ sudo rustdesk-relay-helper history --lines 50
 | 命令 | 行为 |
 | --- | --- |
 | `help [命令]` | 列出所有可用命令及说明，或查看指定命令的参数；无需配置、状态文件或管理员权限。也支持 `--help` 和 `<命令> --help`。 |
+| `manager` | 进入中文安装管理菜单，复用 `manage.sh` 的管理实现；无需先加载业务配置，维护操作需 sudo/root，固定使用系统配置与状态路径。 |
 | `status` | 实时读取 `rs`，展示模式、实际值、目标、上次决策原因、时间和节点详情；不探测、不写 relay。读取失败显示未确认并返回非零退出码。 |
 | `nodes` | 展示配置与已有探测结果，不联系 `hbbs`。 |
 | `probe` | 探测所有启用节点并保存健康计数和有限 RTT 样本，不读取或写入 `hbbs`。 |

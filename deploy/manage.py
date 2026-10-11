@@ -888,7 +888,7 @@ class Manager:
 
 def main():
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        print('请在交互终端运行 bash manage.sh。', file=sys.stderr)
+        print('请在交互终端运行 rustdesk-relay-helper manager（未安装时运行 bash manage.sh）。', file=sys.stderr)
         return 2
     if sys.version_info < (3, 9) or sys.platform != 'linux':
         print('需要 Linux 和 Python 3.9+。', file=sys.stderr)
@@ -916,7 +916,8 @@ def main():
             print('输入无效。')
             continue
         if choice != '2' and os.getuid() != 0:
-            print('此操作需要 root 权限。请在确认来源后运行 sudo bash', SOURCE / 'manage.sh')
+            print('此操作需要 root 权限。已安装时运行 sudo rustdesk-relay-helper manager；'
+                  '未安装时运行 sudo bash', SOURCE / 'manage.sh')
             continue
         try:
             if choice != '2':

@@ -62,7 +62,8 @@ def show_status(config, state):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='RustDesk OSS relay 管理器（CNHZ 宿主机）')
+    parser = argparse.ArgumentParser(prog='rustdesk-relay-helper',
+                                     description='RustDesk OSS relay 管理器（CNHZ 宿主机）')
     parser.add_argument('--config', default=os.environ.get('RELAY_HELPER_CONFIG', '/etc/rustdesk-relay-helper/config.ini'),
                         help='INI 配置路径（环境变量 RELAY_HELPER_CONFIG，默认 %(default)s）')
     parser.add_argument('--state', default=os.environ.get('RELAY_HELPER_STATE', '/var/lib/rustdesk-relay-helper/state.json'),
@@ -77,6 +78,7 @@ def main(argv=None):
         'history': '通过 journalctl 查看最近管理事件',
         'reconcile': '供 timer 使用：探测、读取、决策，必要时写入并回读确认',
         'web': '启动仅监听 127.0.0.1 的 token WebUI；不启用自动 timer',
+        'manager': '进入中文安装管理菜单：安装、状态、修复、更新、回滚和卸载；修改需 sudo/root，使用固定系统配置与状态路径',
         'help': '列出所有命令，或查看指定命令的用法',
     }
     commands = {name: sub.add_parser(name, help=description, description=description)
@@ -93,6 +95,14 @@ def main(argv=None):
         return 0
     setup_logging()
     try:
+        if args.command == 'manager':
+            if sys.platform != 'linux':
+                raise RuntimeError('安装管理需要 Linux 和 Python 3.9+。')
+            script = Path(__file__).resolve().parent.parent / 'deploy/manage.py'
+            if not script.is_file():
+                raise RuntimeError('安装管理文件缺失，请使用完整版本包更新或修复安装。')
+            os.execv(sys.executable, [sys.executable, '-I', '-B', str(script)])
+            return 0
         if args.command == 'web':
             from .web import serve
             return serve(args.config, args.state, args.port, args.token_file)
