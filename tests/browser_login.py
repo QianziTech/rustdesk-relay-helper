@@ -1,5 +1,6 @@
 """Optional browser regression: python tests/browser_login.py (Playwright + Chromium)."""
 
+import os
 import shutil
 import sys
 import tempfile
@@ -20,11 +21,15 @@ try:
 except ImportError:
     sync_playwright = None
 
+REQUIRE_BROWSER = os.environ.get('RELAY_HELPER_REQUIRE_BROWSER') == '1'
+if REQUIRE_BROWSER and sync_playwright is None:
+    raise RuntimeError('Browser regression requires Playwright; install tests/requirements-browser.txt')
+
 TOKEN = 'browser_test_only_' + 'x' * 32
 CONFIG = '[policy]\nrecover_after=1\nrtt_sample_count=1\n[node:a]\naddress=a.test:21117\ntier=10\n'
 
 
-@unittest.skipUnless(sync_playwright and shutil.which('chromium'), 'requires Playwright and Chromium')
+@unittest.skipUnless(sync_playwright, 'requires Playwright')
 class BrowserLoginTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,7 +50,14 @@ class BrowserLoginTests(unittest.TestCase):
         self.addCleanup(self.stop_server)
         self.playwright = sync_playwright().start()
         self.addCleanup(self.playwright.stop)
-        self.browser = self.playwright.chromium.launch(executable_path=shutil.which('chromium'),
+        bundled = self.playwright.chromium.executable_path
+        executable = bundled if Path(bundled).is_file() else shutil.which('chromium')
+        if not executable:
+            message = 'Chromium is missing; run python -m playwright install chromium'
+            if REQUIRE_BROWSER:
+                self.fail(message)
+            self.skipTest(message)
+        self.browser = self.playwright.chromium.launch(executable_path=executable,
                                                        headless=True, args=['--no-sandbox'])
         self.addCleanup(self.browser.close)
         self.context = self.browser.new_context()

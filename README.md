@@ -14,6 +14,21 @@ python -m relay_helper --config config/relay-helper.example.ini --state var/stat
 
 Windows 可运行核心与测试；Bash、journal 和 systemd 在 Linux 使用。不要直接对示例域名运行生产探测。真实开发配置复制为 `config/local.ini`，状态使用 `var/state.json`，两者已被 `.gitignore` 排除。示例配置、测试与文档正常跟踪。
 
+GitHub Actions 在发往 `master` 的 push、各 PR 和手动触发时运行：Ubuntu 24.04 / Python 3.9、3.12、3.14 的 unittest，独立 Chromium 浏览器回归，以及 Bash 和工作流语法检查。PR 新提交会取消同一线路仍在执行的旧检查。失败测试日志作为 Actions artifact 保留 7 天。安装管理测试仍使用临时目录和模拟 systemd；CI 通过不代表现场验收。
+
+浏览器测试依赖仅供开发，不影响标准库运行时。可在虚拟环境中执行：
+
+```bash
+python -m pip install -r tests/requirements-browser.txt
+python -m playwright install chromium
+# Linux 缺少浏览器系统库时使用：python -m playwright install --with-deps chromium
+python tests/browser_login.py
+# 强制依赖齐全；缺少 Playwright/Chromium 时失败，避免 CI 全部跳过后误报成功。
+RELAY_HELPER_REQUIRE_BROWSER=1 python tests/browser_login.py
+```
+
+测试优先使用 Playwright 对应版本的 Chromium，也支持系统 `chromium`。未安装可选依赖时，本地浏览器测试会跳过；CI 强制执行。Actions 固定到完整提交 SHA，Dependabot 每周为 Actions 和浏览器测试依赖提出更新 PR，由维护者审阅合并；工作流不自动合并、发布或部署。
+
 ## 控制台安装管理
 
 下载完整仓库或版本包后运行：
