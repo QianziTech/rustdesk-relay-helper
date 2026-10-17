@@ -216,7 +216,10 @@
         if (disabled) cancelDrag();
         document.querySelectorAll('button:not([data-auth])').forEach(button => {
           if (disabled) { button.dataset.wasDisabled = String(button.disabled); button.disabled = true; }
-          else { button.disabled = !csrf || button.dataset.wasDisabled === 'true'; delete button.dataset.wasDisabled; }
+          else {
+            button.disabled = !csrf || button.dataset.wasDisabled === 'true';
+            if (csrf) delete button.dataset.wasDisabled;
+          }
         });
         $('form-fields').disabled = disabled || original === null;
         $('config-text').disabled = disabled || original === null;

@@ -89,6 +89,42 @@ class InstallationTests(unittest.TestCase):
         files['relay_helper/__init__.py'] += b'\n# new version\n'
         return self.m.prepare(self.prefix, files)
 
+    def test_placeholder_detection_uses_dns_labels_and_normalizes_absolute_names(self):
+        config = manager.CONFIG_DIR / 'config.ini'
+        release = self.prefix / 'releases' / self.version
+        for host, ready in (('notexample.com', True), ('relay.myexample.org', True),
+                            ('example.com', False), ('relay.example.org', False),
+                            ('EXAMPLE.NET.', False), ('relay.EXAMPLE.COM.', False)):
+            with self.subTest(host=host):
+                config.write_text('[policy]\n[node:a]\naddress=' + host + ':21117\ntier=10\n')
+                self.assertEqual(self.m.validate(release, self.python, True)[1], ready)
+                if not ready:
+                    with self.assertRaisesRegex(ValueError, '示例地址'):
+                        self.m.validate(release, self.python)
+
+    def test_purge_rejects_unknown_numeric_backups_before_stopping_services(self):
+        record = self.install()
+        pending = self.m.backup(self.systemd.snapshot(), record)
+        folder = manager.STATE_DIR / 'backups' / pending['backup']
+        self.m.pending.unlink()
+        for name in ('5', '999', '00', '١'):
+            with self.subTest(name=name):
+                unknown = folder / name
+                unknown.write_text('unrelated file')
+                self.systemd.calls.clear()
+                with patch.object(manager, 'confirm', return_value=True):
+                    with self.assertRaisesRegex(ValueError, '备份目录含无关文件'):
+                        self.m.uninstall()
+                self.assertEqual(unknown.read_text(), 'unrelated file')
+                self.assertTrue(self.prefix.exists())
+                self.assertEqual(self.m.read_record()['current'], record['current'])
+                self.assertEqual(self.systemd.calls, [])
+                unknown.unlink()
+        # The five deployment slots and business backups remain valid.
+        for name in ('0', '1', '2', '3', '4', 'config.ini', 'state.json', 'webui.token'):
+            (folder / name).write_text('known backup')
+        self.m.check_purge()
+
     def test_first_install_does_not_enable_timer_or_write_business_state(self):
         record = self.install()
         self.assertEqual(self.m.read_record()['current'], self.version)
