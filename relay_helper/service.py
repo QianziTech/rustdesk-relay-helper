@@ -53,6 +53,7 @@ def reconcile(config, state, console):
     if state.get('pending_target') and actual == [state['pending_target']]:
         state['confirmed_target'] = state.pop('pending_target')
         state['last_switch'] = time.time()
+        state['auto_reselect'] = False
         LOG.info('switch target=%s reason=previous_write_now_confirmed', state['confirmed_target'])
     target, reason = choose(config, state, actual, time.time())
     state['reason'] = reason

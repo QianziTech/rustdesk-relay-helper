@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import stat
 import tempfile
 import threading
 import unittest
@@ -305,6 +306,41 @@ class BackendTests(BackendFixture):
         with self.assertRaises(RuntimeError):
             self.backend.config(document)
         self.assertEqual(backup.read_text(encoding='utf-8'), CONFIG)
+
+    @unittest.skipIf(os.name == 'nt', 'Windows has no directory fsync')
+    def test_config_backup_is_durable_before_new_config_is_published(self):
+        document = self.backend.config()
+        changed = CONFIG.replace('tier=10', 'tier=20')
+        backup = Path(str(self.config_path) + '.webui.bak')
+        synced = []
+        fsync = os.fsync
+
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                self.assertEqual(backup.read_text(encoding='utf-8'), CONFIG)
+                synced.append(self.config_path.read_text(encoding='utf-8'))
+            fsync(fd)
+
+        with patch('relay_helper.io.os.fsync', side_effect=sync):
+            self.backend.config(dict(document, text=changed))
+        self.assertEqual(synced, [CONFIG, changed])
+
+    @unittest.skipIf(os.name == 'nt', 'Windows has no directory fsync')
+    def test_failed_backup_directory_sync_leaves_original_config_and_reports_failure(self):
+        document = self.backend.config()
+        changed = CONFIG.replace('tier=10', 'tier=20')
+        fsync = os.fsync
+
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('backup directory sync failed')
+            fsync(fd)
+
+        with patch('relay_helper.io.os.fsync', side_effect=sync):
+            with self.assertRaisesRegex(OSError, 'backup directory sync failed'):
+                self.backend.config(dict(document, text=changed))
+        self.assertEqual(self.config_path.read_text(encoding='utf-8'), CONFIG)
+        self.assertEqual(list(self.config_path.parent.glob('*.tmp')), [])
 
     def test_manual_target_cannot_be_disabled_removed_or_readdressed(self):
         config = load_config(self.config_path)

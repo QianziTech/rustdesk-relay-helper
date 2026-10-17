@@ -144,6 +144,17 @@ def _valid_sample(point):
             and all(_finite_nonnegative(point[key]) for key in ('at', 'rtt_ms')))
 
 
+def sync_directory(path):
+    # Windows has no directory fsync; the supported Linux deployment requires it.
+    if os.name == 'nt':
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def save_state(path, state):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +165,10 @@ def save_state(path, state):
             temporary = stream.name
             json.dump(state, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
@@ -193,6 +207,7 @@ def replace_config(path, text, revision, state):
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, destination)
+            sync_directory(path.parent)
         finally:
             if temporary and os.path.exists(temporary):
                 os.unlink(temporary)

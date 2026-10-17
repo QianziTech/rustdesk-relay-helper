@@ -94,6 +94,34 @@ class ServiceTests(unittest.TestCase):
             set_manual(self.config, self.state, 'a')
         self.assertEqual(self.state['mode'], 'auto')
 
+    def test_late_auto_confirmation_consumes_reselection_even_without_candidates(self):
+        config = Config(Policy(recover_after=1), (Node('a', 'a.test:21117', 10),
+                                                Node('b', 'b.test:21117', 20)))
+        state = load_state(self.path, config)
+        state.update(pending_target='a.test:21117', auto_reselect=True)
+        console = Mock()
+        console.read.return_value = ['a.test:21117']
+        console.apply.return_value = False
+        with patch('relay_helper.service.time.time', return_value=1000):
+            reconcile(config, state, console)
+        console.apply.assert_not_called()
+        self.assertFalse(state['auto_reselect'])
+        self.assertEqual(state['last_switch'], 1000)
+        save_state(self.path, state)
+        with patch('relay_helper.io.time.time', return_value=1001):
+            state = load_state(self.path, config)
+        record_probe(state['nodes']['a'], 100, None, 1001, config.policy)
+        record_probe(state['nodes']['b'], 10, None, 1001, config.policy)
+        with patch('relay_helper.service.time.time', return_value=1001):
+            reconcile(config, state, console)
+        console.apply.assert_called_once_with('a.test:21117')
+        self.assertIn('保持期', state['reason'])
+        with patch('relay_helper.service.time.time', return_value=1300):
+            record_probe(state['nodes']['a'], 100, None, 1300, config.policy)
+            record_probe(state['nodes']['b'], 10, None, 1300, config.policy)
+            reconcile(config, state, console)
+        self.assertEqual(console.apply.call_args.args, ('b.test:21117',))
+
     def test_cli_hides_expired_values_even_without_loading_again(self):
         record_probe(self.state['nodes']['a'], 10, None, 1000, self.config.policy)
         output = io.StringIO()

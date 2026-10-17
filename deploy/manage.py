@@ -402,7 +402,9 @@ class Manager:
                 'from relay_helper.io import load_state; c=load_config(sys.argv[2]); '
                 'load_state(sys.argv[3],c); '
                 'print(c.policy.probe_interval_seconds); '
-                'print(int(any(n.enabled and endpoint(n.address)[0].lower().endswith(("example.com","example.org","example.net")) for n in c.nodes))); '
+                'hosts=[endpoint(n.address)[0].lower().rstrip(".") for n in c.nodes if n.enabled]; '
+                'print(int(any(host == domain or host.endswith("." + domain) '
+                'for host in hosts for domain in ("example.com","example.org","example.net")))); '
                 'print(int(any(n.enabled for n in c.nodes)))')
         result = run([python, '-I', '-B', '-c', code, str(release), str(config), str(STATE_DIR / 'state.json')])
         interval, placeholder, enabled = result.stdout.strip().splitlines()
@@ -953,7 +955,7 @@ class Manager:
                                 raise ValueError('卸载备份版本目录无效')
                             allowed = set(self.verify_release(release)) | {'release.json'}
                             check_inventory(release, allowed)
-                    elif not path.is_file() or not (path.name.isdigit() or path.name in ('config.ini', 'state.json', 'webui.token')):
+                    elif not path.is_file() or path.name not in {'0', '1', '2', '3', '4', 'config.ini', 'state.json', 'webui.token'}:
                         raise ValueError('备份目录含无关文件')
 
 
