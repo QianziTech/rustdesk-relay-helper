@@ -162,13 +162,16 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(load_state(path, altered)['nodes']['a']['health'], 'unknown')
         self.assertEqual(list(self.path.glob('*.tmp')), [])
 
-    def test_invalid_auto_reselection_flag_rejected(self):
+    def test_invalid_reselection_flags_rejected(self):
         path = self.path / 'state.json'
-        state = load_state(path, self.config)
-        state['auto_reselect'] = 'true'
-        save_state(path, state)
-        with self.assertRaises(ValueError):
-            load_state(path, self.config)
+        for flag in ('auto_reselect', 'pending_auto_reselect'):
+            for value in ('true', 1, None, {}):
+                with self.subTest(flag=flag, value=value):
+                    state = load_state(self.path / 'fresh.json', self.config)
+                    state[flag] = value
+                    save_state(path, state)
+                    with self.assertRaises(ValueError):
+                        load_state(path, self.config)
 
     def test_state_sync_failure_preserves_previous_manual_intent_and_removes_temporary(self):
         path = self.path / 'state.json'

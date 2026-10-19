@@ -101,6 +101,8 @@ def load_state(path, config):
             raise ValueError('运行状态缺少手动目标')
     if type(state.get('auto_reselect', False)) is not bool:
         raise ValueError('运行状态自动选优标记无效')
+    if type(state.get('pending_auto_reselect', False)) is not bool:
+        raise ValueError('运行状态待确认写入来源标记无效')
     active = {}
     now = time.time()
     for node in config.nodes:

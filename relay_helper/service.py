@@ -53,7 +53,9 @@ def reconcile(config, state, console):
     if state.get('pending_target') and actual == [state['pending_target']]:
         state['confirmed_target'] = state.pop('pending_target')
         state['last_switch'] = time.time()
-        state['auto_reselect'] = False
+        # An older manual/regular write must not consume a new resume intent.
+        if state.pop('pending_auto_reselect', False):
+            state['auto_reselect'] = False
         LOG.info('switch target=%s reason=previous_write_now_confirmed', state['confirmed_target'])
     target, reason = choose(config, state, actual, time.time())
     state['reason'] = reason
@@ -67,6 +69,7 @@ def reconcile(config, state, console):
         state['actual'] = None
         state['actual_error'] = str(exc)
         state['pending_target'] = target.address
+        state['pending_auto_reselect'] = state['mode'] == 'auto' and state.get('auto_reselect', False)
         LOG.error('%s', exc)
         raise
     state['actual'] = [target.address]
@@ -77,6 +80,7 @@ def reconcile(config, state, console):
         state['last_switch'] = time.time()
         LOG.info('switch target=%s reason=%s', target.address, reason)
     state['pending_target'] = None
+    state.pop('pending_auto_reselect', None)
     state['auto_reselect'] = False
 
 
@@ -91,6 +95,7 @@ def set_manual(config, state, node_id):
     state['mode'] = 'manual'
     state['manual_target'] = node.id
     state['auto_reselect'] = False
+    state.pop('pending_auto_reselect', None)
     LOG.info('mode=manual target=%s', node.id)
 
 
