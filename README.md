@@ -1,34 +1,12 @@
 # RustDesk OSS Relay Helper
 
-管理 `hbbs` 下发的单个 `hbbr` 地址。按连续健康计数和全局有效 RTT 中位数选择 relay，支持手动固定与自动恢复。第一版实现依据见 [方案与技术选型](docs/方案与技术选型.md)。
+![License](https://img.shields.io/github/license/QianziTech/rustdesk-relay-helper)
 
-运行环境：与 `hbbs` 共享网络命名空间的 Linux 宿主机、Python 3.9+、Bash、systemd。仅使用 Python 标准库，无需 pip 安装依赖。控制台固定连接 `127.0.0.1:21115`，面向 RustDesk Server OSS 1.1.15 的 `rs` 接口。
+管理 `hbbs` 下发的单个 `hbbr` 地址。按连续健康计数和全局有效 RTT 中位数选择 relay，支持手动固定与自动恢复。
 
-## 本地开发
+运行环境：与 `hbbs` 共享网络命名空间的 Linux 宿主机、Python 3.9+、Bash、systemd。仅使用 Python 标准库，无需 pip 安装依赖。
 
-```powershell
-python -m unittest discover -s tests -v
-python -m relay_helper --help
-python -m relay_helper --config config/relay-helper.example.ini --state var/state.json nodes
-```
-
-Windows 可运行核心与测试；Bash、journal 和 systemd 在 Linux 使用。不要直接对示例域名运行生产探测。真实开发配置复制为 `config/local.ini`，状态使用 `var/state.json`，两者已被 `.gitignore` 排除。示例配置、测试与文档正常跟踪。
-
-GitHub Actions 在发往 `master` 的 push、各 PR 和手动触发时运行：Ubuntu 24.04 / Python 3.9、3.12、3.14 的 unittest，独立 Chromium 浏览器回归，以及 Bash 和工作流语法检查。PR 新提交会取消同一线路仍在执行的旧检查。失败测试日志作为 Actions artifact 保留 7 天。安装管理测试仍使用临时目录和模拟 systemd；CI 通过不代表现场验收。
-
-浏览器测试依赖仅供开发，不影响标准库运行时。可在虚拟环境中执行：
-
-```bash
-python -m pip install -r tests/requirements-browser.txt
-python -m playwright install chromium
-# Linux 缺少浏览器系统库时使用：python -m playwright install --with-deps chromium
-python tests/browser_login.py
-# 强制依赖齐全；缺少 Playwright/Chromium 时失败，避免 CI 全部跳过后误报成功。
-RELAY_HELPER_REQUIRE_BROWSER=1 python tests/browser_login.py
-```
-
-测试优先使用 Playwright 对应版本的 Chromium，也支持系统 `chromium`。未安装可选依赖时，本地浏览器测试会跳过；CI 强制执行。Actions 固定到完整提交 SHA，Dependabot 每周为 Actions 和浏览器测试依赖提出更新 PR，由维护者审阅合并；工作流不自动合并、发布或部署。
-
+控制台固定连接 `127.0.0.1:21115`，面向 RustDesk Server OSS 1.1.15 的 `rs` 接口。
 ## 控制台安装管理
 
 下载完整仓库或版本包后运行：
@@ -118,9 +96,32 @@ sudo rustdesk-relay-helper history --lines 50
 
 升级时，旧状态中没有逐点时间的数字样本会被废弃，手动模式和已确认 relay 保留；重新探测后积累带时间戳的点。如果旧配置的 `rtt_sample_count` 大于 5，需要先调为 1–5。升级源码后重启常驻 Web 服务，新 CLI 和定时任务下次启动即加载新代码。
 
-TCP 探测只代表 **CNHZ → relay TCP 端口** 可达。耗时包含主机名解析及 TCP connect，不代表 RustDesk 握手或客户端端到端质量。`status` 中“上次决策原因”来自最近一次 `auto` / `switch` / `reconcile`，`probe` 不重新决策。
+TCP 探测只代表 **特定节点的特定TCP端口** 可达。耗时包含主机名解析及 TCP connect，不代表 RustDesk 握手或客户端端到端质量。`status` 中“上次决策原因”来自最近一次 `auto` / `switch` / `reconcile`，`probe` 不重新决策。
+## 本地开发
 
-## 可选本机 WebUI（试验版）
+```powershell
+python -m unittest discover -s tests -v
+python -m relay_helper --help
+python -m relay_helper --config config/relay-helper.example.ini --state var/state.json nodes
+```
+
+Windows 可运行核心与测试；Bash、journal 和 systemd 在 Linux 使用。不要直接对示例域名运行生产探测。真实开发配置复制为 `config/local.ini`，状态使用 `var/state.json`，两者已被 `.gitignore` 排除。示例配置、测试与文档正常跟踪。
+
+GitHub Actions 在发往 `master` 的 push、各 PR 和手动触发时运行：Ubuntu 24.04 / Python 3.9、3.12、3.14 的 unittest，独立 Chromium 浏览器回归，以及 Bash 和工作流语法检查。PR 新提交会取消同一线路仍在执行的旧检查。失败测试日志作为 Actions artifact 保留 7 天。安装管理测试仍使用临时目录和模拟 systemd；CI 通过不代表现场验收。
+
+浏览器测试依赖仅供开发，不影响标准库运行时。可在虚拟环境中执行：
+
+```bash
+python -m pip install -r tests/requirements-browser.txt
+python -m playwright install chromium
+# Linux 缺少浏览器系统库时使用：python -m playwright install --with-deps chromium
+python tests/browser_login.py
+# 强制依赖齐全；缺少 Playwright/Chromium 时失败，避免 CI 全部跳过后误报成功。
+RELAY_HELPER_REQUIRE_BROWSER=1 python tests/browser_login.py
+```
+
+测试优先使用 Playwright 对应版本的 Chromium，也支持系统 `chromium`。未安装可选依赖时，本地浏览器测试会跳过；CI 强制执行。Actions 固定到完整提交 SHA，Dependabot 每周为 Actions 和浏览器测试依赖提出更新 PR，由维护者审阅合并；工作流不自动合并、发布或部署。
+## 本机WebUI
 
 共享 Python 后端增加 WebUI，固定监听 `127.0.0.1`，默认端口 `8765`。支持状态、探测、手动固定、恢复自动与 INI 编辑；没有独立账户体系。
 
@@ -155,13 +156,11 @@ token 文件属于服务运行用户（默认 root），权限为 `0600`；读�
 ssh -N -L 127.0.0.1:8765:127.0.0.1:8765 user@server
 ```
 
-随后在个人电脑浏览器打开 `http://127.0.0.1:8765/`，输入 token 并点击登录。原有 `/?token=<文件内容>` 链接仍可打开登录确认页，清理地址后需显式登录，不自动创建会话。
+随后在个人电脑浏览器打开 `http://127.0.0.1:8765/`，输入 token 并点击登录。
 
 登录后刷新无需再次输入 token；默认最长 8 小时，可勾选“记住登录”（最多 7 天）。两种会话都不会随访问续期，Web 服务重启后全部失效，必须重新输入 token；原始 token 文件仍跨重启保留。页面“退出登录”会撤销当前会话并清除 Cookie。关闭浏览器或 SSH 隧道不保证退出。更换本地端口或主机名需重新登录。
 
-停止常驻服务并取消开机启动使用 `sudo systemctl disable --now rustdesk-relay-helper-web.service`，不会停止 relay 自动选择 timer。会话与 SSH 安全边界见 [登录持久化设计](docs/Web登录持久化设计.md)。
-
-配置保存共用 CLI 的锁，先校验与检查版本，上一版保存在 `<配置>.webui.bak`。token 轮换与完整安全边界见 [WebUI 方案](docs/WebUI方案.md)。
+停止常驻服务并取消开机启动使用 `sudo systemctl disable --now rustdesk-relay-helper-web.service`，不会停止 relay 自动选择 timer。
 
 “节点与策略配置”默认使用 GUI 表单，提供策略数字输入、节点 ID / 地址、启用与 RTT 排名开关。拖动节点卡片只调整展示顺序，界面不显示层级数字；运行节点列表按有效 RTT 排名，与卡片展示顺序无关。可增删节点，也可聚焦拖动按钮使用方向键移动。可切换到 INI 文本编辑，两种方式双向映射同一份草稿；拖动、切换和预览均不保存。保存拖动顺序时只调整 `tier`，保留配置节顺序，不影响相同 RTT 或兜底节点的选择。现有配置节的注释与未修改字段保留，最终统一使用“校验并保存”提交。非法 INI 不能映射到表单，但原文仍保留供修正。
 
@@ -186,6 +185,5 @@ OnUnitInactiveSec=30s
 
 停止自动执行使用 `sudo systemctl stop rustdesk-relay-helper.timer`；正在执行的单次 service 仍会完成。如需完全停止管理器，再停止 `rustdesk-relay-helper.service`。停止不会清空 `hbbs` 的 relay 值。`hbbs` 重启丢失运行时列表后，后续 reconcile 在健康条件满足时重新应用目标。
 
-## 验证边界
-
-本地测试覆盖策略序列、状态持久化、锁互斥及 TCP 假控制台的空响应、超时、延迟生效和错误列表。GitHub Actions 配置为 Linux / Python 3.9、3.12。真实服务器的 `rs` 行为、systemd 服务运行及两端中继会话仍需按 [实施规划](docs/实施规划.md) 现场验收。
+## 友情链接
+[LINUX DO](https://linux.do/)
