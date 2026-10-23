@@ -1,6 +1,8 @@
 import socket
 import socketserver
 import json
+import os
+import stat
 import tempfile
 import threading
 import time
@@ -160,13 +162,69 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(load_state(path, altered)['nodes']['a']['health'], 'unknown')
         self.assertEqual(list(self.path.glob('*.tmp')), [])
 
-    def test_invalid_auto_reselection_flag_rejected(self):
+    def test_invalid_reselection_flags_rejected(self):
+        path = self.path / 'state.json'
+        for flag in ('auto_reselect', 'pending_auto_reselect'):
+            for value in ('true', 1, None, {}):
+                with self.subTest(flag=flag, value=value):
+                    state = load_state(self.path / 'fresh.json', self.config)
+                    state[flag] = value
+                    save_state(path, state)
+                    with self.assertRaises(ValueError):
+                        load_state(path, self.config)
+
+    def test_state_sync_failure_preserves_previous_manual_intent_and_removes_temporary(self):
         path = self.path / 'state.json'
         state = load_state(path, self.config)
-        state['auto_reselect'] = 'true'
+        state.update(mode='manual', manual_target='a')
         save_state(path, state)
-        with self.assertRaises(ValueError):
-            load_state(path, self.config)
+        original = path.read_bytes()
+        state.update(mode='auto', manual_target=None)
+        with patch('relay_helper.io.os.fsync', side_effect=OSError('disk sync failed')):
+            with self.assertRaisesRegex(OSError, 'disk sync failed'):
+                save_state(path, state)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(self.path.glob('*.tmp')), [])
+
+    @unittest.skipIf(os.name == 'nt', 'Windows has no directory fsync')
+    def test_state_is_complete_before_publish_and_directory_is_synced_after_publish(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        state.update(mode='manual', manual_target='a')
+        synced = []
+        fsync = os.fsync
+
+        def sync(fd):
+            directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+            if directory:
+                self.assertEqual(json.loads(path.read_text())['mode'], 'manual')
+            else:
+                self.assertFalse(path.exists())
+                temporary, = self.path.glob('*.tmp')
+                self.assertEqual(json.loads(temporary.read_text())['manual_target'], 'a')
+            synced.append(directory)
+            fsync(fd)
+
+        with patch('relay_helper.io.os.fsync', side_effect=sync):
+            save_state(path, state)
+        self.assertEqual(synced, [False, True])
+
+    @unittest.skipIf(os.name == 'nt', 'Windows has no directory fsync')
+    def test_state_directory_sync_failure_is_reported_after_complete_publish(self):
+        path = self.path / 'state.json'
+        state = load_state(path, self.config)
+        fsync = os.fsync
+
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('directory sync failed')
+            fsync(fd)
+
+        with patch('relay_helper.io.os.fsync', side_effect=sync):
+            with self.assertRaisesRegex(OSError, 'directory sync failed'):
+                save_state(path, state)
+        self.assertEqual(json.loads(path.read_text())['mode'], 'auto')
+        self.assertEqual(list(self.path.glob('*.tmp')), [])
 
     def test_legacy_samples_discarded_without_losing_manual_or_confirmed_target(self):
         path = self.path / 'state.json'

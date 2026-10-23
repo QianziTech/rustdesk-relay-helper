@@ -188,6 +188,31 @@ class BrowserLoginTests(unittest.TestCase):
                     self.assertIn('x-csrf-token', headers)
         self.assertEqual(self.errors, [])
 
+    def test_reauthentication_preserves_disabled_switches_without_replaying_actions(self):
+        self.config_path.write_text(CONFIG + '\n[node:disabled]\naddress=disabled.test:21117\n'
+                                    'tier=20\nenabled=false\n', encoding='utf-8')
+        page = self.page
+        page.goto(self.url)
+        self.login()
+        buttons = page.locator('#nodes button')
+        expect(buttons).to_have_count(2)
+        # Neither the unprobed nor explicitly disabled node can be fixed.
+        for button in buttons.all():
+            expect(button).to_be_disabled()
+        self.restart_server()
+        page.locator('#refresh').click()
+        expect(page.locator('#login-panel')).to_be_visible()
+        self.login()
+        for button in buttons.all():
+            expect(button).to_be_disabled()
+        self.tcp.assert_not_called()
+        self.console.apply.assert_not_called()
+        # A later probe can still enable the healthy node, but never the disabled one.
+        page.locator('#probe').click()
+        expect(buttons.nth(0)).to_be_enabled()
+        expect(buttons.nth(1)).to_be_disabled()
+        self.assertEqual(self.errors, [])
+
     def test_probe_counts_rounds_and_failed_healthy_node_can_retry_switch(self):
         self.config_path.write_text('[policy]\n[node:a]\naddress=a.test:21117\ntier=10\n', encoding='utf-8')
         page = self.page

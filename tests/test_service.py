@@ -94,6 +94,133 @@ class ServiceTests(unittest.TestCase):
             set_manual(self.config, self.state, 'a')
         self.assertEqual(self.state['mode'], 'auto')
 
+    def test_late_auto_confirmation_consumes_reselection_even_without_candidates(self):
+        config = Config(Policy(recover_after=1), (Node('a', 'a.test:21117', 10),
+                                                Node('b', 'b.test:21117', 20)))
+        state = load_state(self.path, config)
+        state.update(mode='manual', manual_target='b')
+        console = Mock()
+        console.read.return_value = []
+        console.apply.side_effect = ConsoleError('not confirmed')
+        with patch('relay_helper.service.time.time', return_value=879), \
+                patch('relay_helper.service.probe_tcp', side_effect=lambda node, timeout:
+                      (10 if node.id == 'a' else 100, None)):
+            with self.assertRaises(ConsoleError):
+                operate(config, state, console, 'auto')
+        save_state(self.path, state)
+        with patch('relay_helper.io.time.time', return_value=1000):
+            state = load_state(self.path, config)
+        console.apply.reset_mock()
+        console.apply.side_effect = None
+        console.read.return_value = ['a.test:21117']
+        console.apply.return_value = False
+        with patch('relay_helper.service.time.time', return_value=1000):
+            reconcile(config, state, console)
+        console.apply.assert_not_called()
+        self.assertFalse(state['auto_reselect'])
+        self.assertEqual(state['last_switch'], 1000)
+        save_state(self.path, state)
+        with patch('relay_helper.io.time.time', return_value=1001):
+            state = load_state(self.path, config)
+        record_probe(state['nodes']['a'], 100, None, 1001, config.policy)
+        record_probe(state['nodes']['b'], 10, None, 1001, config.policy)
+        with patch('relay_helper.service.time.time', return_value=1001):
+            reconcile(config, state, console)
+        console.apply.assert_called_once_with('a.test:21117')
+        self.assertIn('保持期', state['reason'])
+        with patch('relay_helper.service.time.time', return_value=1300):
+            record_probe(state['nodes']['a'], 100, None, 1300, config.policy)
+            record_probe(state['nodes']['b'], 10, None, 1300, config.policy)
+            reconcile(config, state, console)
+        self.assertEqual(console.apply.call_args.args, ('b.test:21117',))
+
+    def test_resume_auto_after_manual_timeout_reselects_across_reload(self):
+        config = Config(Policy(fail_after=1, recover_after=1),
+                        (Node('a', 'a.test:21117', 10), Node('b', 'b.test:21117', 20)))
+        for no_candidates in (False, True):
+            with self.subTest(no_candidates=no_candidates):
+                self.path.unlink(missing_ok=True)
+                state = load_state(self.path, config)
+                console = Mock()
+                console.read.return_value = []
+                console.apply.side_effect = ConsoleError('manual write timed out')
+                with patch('relay_helper.service.time.time', return_value=1000), \
+                        patch('relay_helper.service.probe_tcp', return_value=(100, None)):
+                    with self.assertRaises(ConsoleError):
+                        operate(config, state, console, 'switch', 'a')
+                self.assertEqual(state['pending_target'], 'a.test:21117')
+                save_state(self.path, state)
+                with patch('relay_helper.io.time.time', return_value=1001):
+                    state = load_state(self.path, config)
+                console.read.return_value = ['a.test:21117']
+                console.apply.reset_mock()
+                console.apply.side_effect = None
+                console.apply.return_value = True
+                if no_candidates:
+                    with patch('relay_helper.service.time.time', return_value=1001), \
+                            patch('relay_helper.service.probe_tcp', return_value=(None, 'down')):
+                        operate(config, state, console, 'auto')
+                    console.apply.assert_not_called()
+                    self.assertTrue(state['auto_reselect'])
+                    save_state(self.path, state)
+                    with patch('relay_helper.io.time.time', return_value=1002):
+                        state = load_state(self.path, config)
+                with patch('relay_helper.service.time.time', return_value=1002), \
+                        patch('relay_helper.service.probe_tcp', side_effect=lambda node, timeout:
+                              (100 if node.id == 'a' else 90, None)):
+                    operate(config, state, console, 'reconcile' if no_candidates else 'auto')
+                console.apply.assert_called_once_with('b.test:21117')
+                self.assertFalse(state['auto_reselect'])
+                self.assertIsNone(state['pending_target'])
+                self.assertEqual(state['last_switch'], 1002)
+
+    def test_pending_confirmation_without_reselection_source_keeps_new_intent(self):
+        for source in ({}, {'pending_auto_reselect': False}):
+            with self.subTest(source=source):
+                state = dict(self.state, pending_target='a.test:21117', auto_reselect=True, **source)
+                save_state(self.path, state)
+                state = load_state(self.path, self.config)
+                console = Mock()
+                console.read.return_value = ['a.test:21117']
+                with patch('relay_helper.service.time.time', return_value=1000):
+                    reconcile(self.config, state, console)
+                console.apply.assert_not_called()
+                self.assertTrue(state['auto_reselect'])
+                self.assertEqual(state['confirmed_target'], 'a.test:21117')
+                self.assertEqual(state['last_switch'], 1000)
+                self.assertNotIn('pending_auto_reselect', state)
+
+    def test_manual_mode_invalidates_previous_pending_reselection_source(self):
+        config = Config(Policy(recover_after=1, rtt_sample_count=1),
+                        (Node('a', 'a.test:21117', 10), Node('b', 'b.test:21117', 20)))
+        state = load_state(self.path, config)
+        state['auto_reselect'] = True
+        record_probe(state['nodes']['a'], 10, None, 1000, config.policy)
+        record_probe(state['nodes']['b'], 100, None, 1000, config.policy)
+        console = Mock()
+        console.read.return_value = []
+        console.apply.side_effect = ConsoleError('auto write timed out')
+        with patch('relay_helper.service.time.time', return_value=1000):
+            with self.assertRaises(ConsoleError):
+                reconcile(config, state, console)
+            self.assertTrue(state['pending_auto_reselect'])
+            set_manual(config, state, 'b')
+        self.assertNotIn('pending_auto_reselect', state)
+        save_state(self.path, state)
+        with patch('relay_helper.io.time.time', return_value=1001):
+            state = load_state(self.path, config)
+        console.read.return_value = ['a.test:21117']
+        console.apply.reset_mock()
+        console.apply.side_effect = None
+        console.apply.return_value = True
+        with patch('relay_helper.service.time.time', return_value=1001), \
+                patch('relay_helper.service.probe_tcp', side_effect=lambda node, timeout:
+                      (100 if node.id == 'a' else 90, None)):
+            operate(config, state, console, 'auto')
+        console.apply.assert_called_once_with('b.test:21117')
+        self.assertFalse(state['auto_reselect'])
+        self.assertNotIn('pending_auto_reselect', state)
+
     def test_cli_hides_expired_values_even_without_loading_again(self):
         record_probe(self.state['nodes']['a'], 10, None, 1000, self.config.policy)
         output = io.StringIO()
